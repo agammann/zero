@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0
+
+- Refuse selected files that contain named Windows data streams before any encryption or overwrite. The app cannot overwrite those streams through its current file handle, so processing them would give a misleading result.
+- Add `--preview` for a read-only check of explicitly selected files and folders. It uses the same preflight rules and storage summary as saved-profile previews, without adding a confirmation step to drag-and-drop runs.
+- Show failures with an error dialog and identify a processed file if optional receipt creation fails after its removal.
+- Clear one-byte plaintext change-detection buffers on exit. The AES-256-GCM, logical readback, key clearing, and selected-file-only sequence remains the same.
+
 ## 0.5.0
 
 - Add read-only storage-context assessment for each explicitly selected file. Preview and local completion dialogs report the observed drive category, file system, and shared-block capability.

@@ -2,7 +2,7 @@
 
 Zero is a free, open-source Windows app for the files and folders you explicitly select. Drag up to 32 files or folders onto `Zero.exe`; it starts immediately without a confirmation prompt. A folder drop includes its nested ordinary files and removes the selected folders when they are empty. Zero does not retain a vault. Volume roots are refused; Zero has no whole-device operation.
 
-For each file, Zero writes an AES-256-GCM encrypted stage on the same volume, authenticates that stage, replaces the selected file's current logical contents with the verified ciphertext, clears its working key, overwrites the file once with random bytes, checks the logical readback, and deletes it. It rejects reparse points, files with other hard links, and unsupported file attributes. The whole selection is inspected before the first file is changed, with a limit of 100,000 files.
+For each file, Zero writes an AES-256-GCM encrypted stage on the same volume, authenticates that stage, replaces the selected file's current logical contents with the verified ciphertext, clears its working key, overwrites the file once with random bytes, checks the logical readback, and deletes it. It rejects reparse points, files with other hard links, named data streams, and unsupported file attributes. The whole selection is inspected before the first file is changed, with a limit of 100,000 files.
 
 **Zero is destructive.** A processed file cannot be restored through Zero. If a batch fails, earlier files stay processed. Backups, snapshots, cloud copies, old blocks, and device-reserved storage may still hold data. Read [the storage and key model](STORAGE_AND_KEY_MODEL.md) before using Zero for sensitive files. Zero has no independent security audit or forensic certification; the Windows executable is unsigned.
 
@@ -17,6 +17,8 @@ During inspection, Zero makes read-only Windows queries for each selected file's
 1. Download `Zero.exe` from a release, or [build it](#build-and-test).
 2. Put disposable files in a test folder and drag that folder onto `Zero.exe` to see the behavior.
 3. Drag only files or folders you intend to remove. There is no confirmation prompt.
+
+To inspect a selection without changing it, run `./Zero.exe --preview "D:\Disposable\example.txt"` in PowerShell. The preview lists up to 15 selected files and shows the observed storage context. It does not create a vault or perform recovery. Dropping files onto the executable still starts processing immediately.
 
 The advanced commands below are run from PowerShell. Put `--quiet` first to suppress result dialogs; failures are written to `%LOCALAPPDATA%\Zero\last-error.txt` and return exit code 1.
 

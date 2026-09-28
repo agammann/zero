@@ -46,7 +46,7 @@ fn main() {
                     let _ = fs::write(dir.join("last-error.txt"), error.to_string());
                 }
             } else {
-                show_dialog("Zero", &format!("Operation stopped:\n\n{error}"));
+                show_error_dialog("Zero stopped", &format!("{error}"));
             }
             std::process::exit(1);
         }
@@ -270,6 +270,19 @@ fn run() -> AppResult<()> {
         }
         return Ok(());
     }
+    if args.peek().is_some_and(|arg| arg == "--preview") {
+        args.next();
+        if quiet {
+            return Err("preview needs a visible dialog; omit --quiet".into());
+        }
+        let sources: Vec<PathBuf> = args.map(PathBuf::from).collect();
+        if sources.is_empty() || sources.len() > 32 {
+            return Err("preview needs 1 to 32 files or folders".into());
+        }
+        let (files, _, _) = collect_selection(&sources, None, true)?;
+        show_selection_preview("Zero selection preview", None, &files, 0, 0);
+        return Ok(());
+    }
     if args.peek().is_some_and(|arg| arg == "--preview-profile") {
         args.next();
         let name = args.next().ok_or("profile name is required")?;
@@ -288,38 +301,12 @@ fn run() -> AppResult<()> {
             .filter(|path| path.exists())
             .collect();
         let (files, _, skipped) = collect_selection(&sources, Some(&profile.filters), true)?;
-        let mut storage = StorageSummary::default();
-        for selected in &files {
-            storage.add(&selected.storage);
-        }
-        let mut listed = files
-            .iter()
-            .take(15)
-            .map(|file| {
-                let path = file.path.to_string_lossy();
-                let mut short: String = path.chars().take(160).collect();
-                if path.chars().count() > 160 {
-                    short.push_str("...");
-                }
-                short
-            })
-            .collect::<Vec<_>>();
-        if files.len() > listed.len() {
-            listed.push(format!("... and {} more", files.len() - listed.len()));
-        }
-        show_dialog(
+        show_selection_preview(
             "Zero profile preview",
-            &format!(
-                "Profile: {name}\nMatching files: {}\nSkipped by filters: {skipped}\nMissing selected paths: {}\n\n{}\n\n{}\n\nPreview only. No file was encrypted or deleted. Historical copies and physical blocks were not assessed.",
-                files.len(),
-                source_count - sources.len(),
-                if listed.is_empty() {
-                    "(no matching files)".to_owned()
-                } else {
-                    listed.join("\n")
-                },
-                storage.describe()
-            ),
+            Some(name),
+            &files,
+            skipped,
+            source_count - sources.len(),
         );
         return Ok(());
     }
@@ -464,7 +451,13 @@ fn run() -> AppResult<()> {
                     processed.original_bytes,
                     &processed.storage,
                     dir,
-                )?;
+                )
+                .map_err(|error| {
+                    format!(
+                        "{} was processed and removed, but its receipt could not be saved: {error}",
+                        selected.path.display()
+                    )
+                })?;
             }
             storage.add(&processed.storage);
             completed += 1;
@@ -817,6 +810,14 @@ fn create_encrypted_stage(source: &Path) -> AppResult<(File, PathBuf)> {
 }
 
 fn show_dialog(title: &str, message: &str) {
+    show_dialog_with_icon(title, message, 0x40);
+}
+
+fn show_error_dialog(title: &str, message: &str) {
+    show_dialog_with_icon(title, message, 0x10);
+}
+
+fn show_dialog_with_icon(title: &str, message: &str, icon: u32) {
     #[link(name = "user32")]
     unsafe extern "system" {
         fn MessageBoxW(
@@ -829,7 +830,54 @@ fn show_dialog(title: &str, message: &str) {
     let title: Vec<u16> = title.encode_utf16().chain([0]).collect();
     let message: Vec<u16> = message.encode_utf16().chain([0]).collect();
     // Both buffers are valid, NUL-terminated UTF-16 for the duration of this call.
-    unsafe { MessageBoxW(std::ptr::null_mut(), message.as_ptr(), title.as_ptr(), 0x40) };
+    unsafe { MessageBoxW(std::ptr::null_mut(), message.as_ptr(), title.as_ptr(), icon) };
+}
+
+fn show_selection_preview(
+    title: &str,
+    profile: Option<&str>,
+    files: &[SelectedFile],
+    skipped: usize,
+    missing: usize,
+) {
+    let mut storage = StorageSummary::default();
+    for selected in files {
+        storage.add(&selected.storage);
+    }
+    let mut listed = files
+        .iter()
+        .take(15)
+        .map(|file| {
+            let path = file.path.to_string_lossy();
+            let mut short: String = path.chars().take(160).collect();
+            if path.chars().count() > 160 {
+                short.push_str("...");
+            }
+            short
+        })
+        .collect::<Vec<_>>();
+    if files.len() > listed.len() {
+        listed.push(format!("... and {} more", files.len() - listed.len()));
+    }
+    let details = match profile {
+        Some(name) => format!(
+            "Profile: {name}\nMatching files: {}\nSkipped by filters: {skipped}\nMissing selected paths: {missing}",
+            files.len()
+        ),
+        None => format!("Selected files: {}", files.len()),
+    };
+    show_dialog(
+        title,
+        &format!(
+            "{details}\n\n{}\n\n{}\n\nPreview only. No file was encrypted or deleted. Historical copies and physical blocks were not assessed.",
+            if listed.is_empty() {
+                "(no matching files)".to_owned()
+            } else {
+                listed.join("\n")
+            },
+            storage.describe()
+        ),
+    );
 }
 
 fn open_for_preview(source: &Path) -> AppResult<File> {
@@ -874,7 +922,91 @@ fn validate_file_handle(file: &File) -> AppResult<()> {
     if hard_link_count(file)? != 1 {
         return Err("files with another hard link are refused".into());
     }
+    refuse_named_streams(file)?;
     Ok(())
+}
+
+fn refuse_named_streams(file: &File) -> AppResult<()> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandleEx(
+            handle: *mut c_void,
+            class: u32,
+            info: *mut c_void,
+            length: u32,
+        ) -> i32;
+    }
+    const FILE_STREAM_INFO: u32 = 7;
+    const ERROR_HANDLE_EOF: i32 = 38;
+    const ERROR_INSUFFICIENT_BUFFER: i32 = 122;
+    const ERROR_MORE_DATA: i32 = 234;
+    const MAX_STREAM_INFO: usize = 1024 * 1024;
+
+    // FILE_STREAM_INFO requires 8-byte alignment. A u64 buffer also permits
+    // safely reading its fixed-size fields without unaligned pointer casts.
+    let mut buffer = vec![0u64; 512];
+    loop {
+        let length = (buffer.len() * size_of::<u64>()) as u32;
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FILE_STREAM_INFO,
+                buffer.as_mut_ptr().cast(),
+                length,
+            )
+        };
+        if ok != 0 {
+            break;
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(ERROR_HANDLE_EOF) => return Ok(()),
+            Some(ERROR_INSUFFICIENT_BUFFER | ERROR_MORE_DATA)
+                if (length as usize) < MAX_STREAM_INFO =>
+            {
+                buffer.resize(buffer.len() * 2, 0);
+            }
+            _ => return Err(error.into()),
+        }
+    }
+
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            buffer.as_ptr().cast::<u8>(),
+            buffer.len() * size_of::<u64>(),
+        )
+    };
+    let mut offset = 0usize;
+    let default_name: Vec<u16> = "::$DATA".encode_utf16().collect();
+    loop {
+        if offset + 24 > bytes.len() {
+            return Err("invalid file stream information".into());
+        }
+        let next = u32::from_ne_bytes(bytes[offset..offset + 4].try_into()?) as usize;
+        let name_len = u32::from_ne_bytes(bytes[offset + 4..offset + 8].try_into()?) as usize;
+        if !name_len.is_multiple_of(2) || offset + 24 + name_len > bytes.len() {
+            return Err("invalid file stream name".into());
+        }
+        let name: Vec<u16> = bytes[offset + 24..offset + 24 + name_len]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_ne_bytes(*pair))
+            .collect();
+        if name != default_name {
+            return Err(
+                "files with named data streams are refused; those streams would not be overwritten"
+                    .into(),
+            );
+        }
+        if next == 0 {
+            return Ok(());
+        }
+        if next < 24 + name_len || !next.is_multiple_of(8) || offset + next >= bytes.len() {
+            return Err("invalid file stream chain".into());
+        }
+        offset += next;
+    }
 }
 
 #[repr(C)]
@@ -958,8 +1090,8 @@ fn encrypt_stream<W: Write>(input: &mut File, output: &mut W, key: &[u8; 32]) ->
         buffer.clear();
         remaining -= length as u64;
     }
-    let mut extra = [0u8; 1];
-    if input.read(&mut extra)? != 0 {
+    let mut extra = Zeroizing::new([0u8; 1]);
+    if input.read(&mut extra[..])? != 0 {
         return Err("source changed during encryption".into());
     }
     let final_nonce: Nonce<<Aes256Gcm as aes_gcm::AeadCore>::NonceSize> =
@@ -1052,8 +1184,8 @@ fn verify_encrypted_stage(stage: &mut File, source: &mut File, key: &[u8; 32]) -
             &mut *final_frame,
         )
         .map_err(|_| "encrypted file final authentication failed")?;
-    let mut extra = [0u8; 1];
-    if stage.read(&mut extra)? != 0 || source.read(&mut extra)? != 0 {
+    let mut extra = Zeroizing::new([0u8; 1]);
+    if stage.read(&mut extra[..])? != 0 || source.read(&mut extra[..])? != 0 {
         return Err("file changed during encrypted verification".into());
     }
     Ok(())
@@ -1274,6 +1406,20 @@ mod tests {
         fs::hard_link(&selected, &other_link).unwrap();
         assert!(open_for_destroy(&selected).is_err());
         assert_eq!(fs::read(&other_link).unwrap(), b"shared content");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refuses_named_streams_without_changing_either_stream() {
+        let root = test_root("streams");
+        let selected = root.join("selected.txt");
+        fs::write(&selected, b"main content").unwrap();
+        let named = PathBuf::from(format!("{}:private", selected.display()));
+        fs::write(&named, b"named content").unwrap();
+        let error = open_for_destroy(&selected).unwrap_err().to_string();
+        assert!(error.contains("named data streams"), "{error}");
+        assert_eq!(fs::read(&selected).unwrap(), b"main content");
+        assert_eq!(fs::read(&named).unwrap(), b"named content");
         fs::remove_dir_all(root).unwrap();
     }
 
