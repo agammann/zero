@@ -1,0 +1,38 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust
+        run: rustup update stable
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Tests
+        run: cargo test --locked
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Build executable
+        shell: pwsh
+        run: .\build-windows.ps1
+      - name: Package archives
+        shell: pwsh
+        run: .\package-release.ps1
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag and package version differ.' }
+          gh release create $env:GITHUB_REF_NAME .\Zero.exe ".\dist\Zero-$version-Windows.zip" ".\dist\Zero-$version-Source.zip" --title "Zero $version" --notes-file .\CHANGELOG.md --verify-tag
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }
