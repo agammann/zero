@@ -29,7 +29,7 @@ function New-ZeroArchive {
 }
 
 $docs = @('README.md', 'CHANGELOG.md', 'STORAGE_AND_KEY_MODEL.md', 'REMOTE_JOBS.md', 'THIRD_PARTY_NOTICES.md', 'LICENSE')
-$sourceFiles = @('Cargo.toml', 'Cargo.lock', 'build-windows.ps1', 'package-release.ps1', '.github\workflows\windows.yml', '.github\workflows\release.yml') + $docs + @('src\main.rs', 'src\profiles.rs', 'src\receipts.rs', 'src\remote.rs')
+$sourceFiles = @('Cargo.toml', 'Cargo.lock', 'build-windows.ps1', 'package-release.ps1', '.github\workflows\windows.yml', '.github\workflows\release.yml') + $docs + @('src\main.rs', 'src\filters.rs', 'src\profiles.rs', 'src\receipts.rs', 'src\remote.rs')
 $windowsFiles = @('Zero.exe') + $docs
 New-ZeroArchive -Destination (Join-Path $output "Zero-$version-Source.zip") -RelativePaths $sourceFiles
 New-ZeroArchive -Destination (Join-Path $output "Zero-$version-Windows.zip") -RelativePaths $windowsFiles

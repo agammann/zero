@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0
+
+- Add optional extension, modified-age, and filename-exclusion filters to saved profiles. Existing profiles remain unfiltered.
+- Add a read-only profile preview showing matching files and skip counts before a profile is run or scheduled.
+- Apply profile filters to local, scheduled, and authenticated remote jobs, with a second check immediately before each file is processed.
+- Keep direct file and folder drops literal and leave volume roots unsupported.
+
 ## 0.3.1
 
 - Remove whole-volume selection. The `--volume` command now stops without processing selected files.

@@ -1,9 +1,7 @@
+use crate::filters::FileFilters;
 use crate::profiles;
 use crate::receipts::{hex, signing_key, unhex, write_receipt};
-use crate::{
-    AppResult, FileIdentity, collect_selection, file_identity, open_for_destroy,
-    process_one_with_identity, state_directory,
-};
+use crate::{AppResult, FileIdentity, collect_selection, process_one_with_filter, state_directory};
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -55,6 +53,8 @@ struct Snapshot {
     command: CommandBody,
     files: Vec<SnapshotFile>,
     receipt_directory: Option<Vec<u16>>,
+    #[serde(default)]
+    filters: FileFilters,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -65,7 +65,13 @@ pub struct ResultBody {
     pub nonce: String,
     pub files_completed: usize,
     pub files_missing: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub files_skipped_filter: usize,
     pub completed_unix_seconds: u64,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 #[derive(Deserialize, Serialize)]
@@ -268,9 +274,13 @@ fn verify_command(command: &SignedCommand, config: &DeviceConfig) -> AppResult<(
 }
 
 fn snapshot(command: &CommandBody, queue: &Path) -> AppResult<Snapshot> {
-    let (paths, receipts) = profiles::load(&command.profile)?;
-    let paths: Vec<PathBuf> = paths.into_iter().filter(|path| path.exists()).collect();
-    let (files, folders) = collect_selection(&paths)?;
+    let profile = profiles::load(&command.profile)?;
+    let paths: Vec<PathBuf> = profile
+        .paths
+        .into_iter()
+        .filter(|path| path.exists())
+        .collect();
+    let (files, folders, _) = collect_selection(&paths, Some(&profile.filters), false)?;
     let queue_name = fs::canonicalize(queue)?.to_string_lossy().to_lowercase();
     if folders.iter().any(|folder| {
         let folder_name = fs::canonicalize(folder)
@@ -282,7 +292,7 @@ fn snapshot(command: &CommandBody, queue: &Path) -> AppResult<Snapshot> {
     }) {
         return Err("remote queue is inside a selected folder".into());
     }
-    if let Some(directory) = &receipts {
+    if let Some(directory) = &profile.receipt_directory {
         let receipt_name = std::path::absolute(directory)?
             .to_string_lossy()
             .to_lowercase();
@@ -302,40 +312,52 @@ fn snapshot(command: &CommandBody, queue: &Path) -> AppResult<Snapshot> {
         });
     }
     Ok(Snapshot {
-        version: 1,
+        version: 2,
         command: command.clone(),
         files: captured,
-        receipt_directory: receipts.map(|path| path.as_os_str().encode_wide().collect()),
+        receipt_directory: profile
+            .receipt_directory
+            .map(|path| path.as_os_str().encode_wide().collect()),
+        filters: profile.filters,
     })
 }
 
-fn process_snapshot(snapshot: &Snapshot) -> AppResult<(usize, usize)> {
-    if snapshot.version != 1 || snapshot.files.len() > 100_000 {
+fn process_snapshot(snapshot: &Snapshot) -> AppResult<(usize, usize, usize)> {
+    if !(1..=2).contains(&snapshot.version)
+        || (snapshot.version == 1 && snapshot.filters != FileFilters::default())
+        || snapshot.files.len() > 100_000
+    {
         return Err("remote snapshot format is unsupported".into());
     }
+    snapshot.filters.validate()?;
     let mut completed = 0;
     let mut missing = 0;
+    let mut skipped_filter = 0;
     for selected in &snapshot.files {
         let path = PathBuf::from(OsString::from_wide(&selected.path));
         if !path.try_exists()? {
             missing += 1;
             continue;
         }
-        let file = open_for_destroy(&path)?;
-        if file_identity(&file)? != selected.identity {
-            return Err(format!("remote-selected file changed: {}", path.display()).into());
+        let bytes = process_one_with_filter(&path, selected.identity, Some(&snapshot.filters))?;
+        if let Some(bytes) = bytes {
+            if let Some(directory) = &snapshot.receipt_directory {
+                write_receipt(&path, bytes, &PathBuf::from(OsString::from_wide(directory)))?;
+            }
+            completed += 1;
+        } else {
+            skipped_filter += 1;
         }
-        drop(file);
-        let bytes = process_one_with_identity(&path, selected.identity)?;
-        if let Some(directory) = &snapshot.receipt_directory {
-            write_receipt(&path, bytes, &PathBuf::from(OsString::from_wide(directory)))?;
-        }
-        completed += 1;
     }
-    Ok((completed, missing))
+    Ok((completed, missing, skipped_filter))
 }
 
-fn result_for(snapshot: &Snapshot, completed: usize, missing: usize) -> AppResult<SignedResult> {
+fn result_for(
+    snapshot: &Snapshot,
+    completed: usize,
+    missing: usize,
+    skipped_filter: usize,
+) -> AppResult<SignedResult> {
     let key = signing_key(&state_directory()?)?;
     let body = ResultBody {
         version: 1,
@@ -344,6 +366,7 @@ fn result_for(snapshot: &Snapshot, completed: usize, missing: usize) -> AppResul
         nonce: snapshot.command.nonce.clone(),
         files_completed: completed,
         files_missing: missing,
+        files_skipped_filter: skipped_filter,
         completed_unix_seconds: now()?,
     };
     let signature = key.sign(&signing_bytes(RESULT_DOMAIN, &body)?);
@@ -429,8 +452,8 @@ pub fn poll_once() -> AppResult<usize> {
             if captured.command != command.body {
                 return Err("remote recovery snapshot does not match the signed command".into());
             }
-            let (completed, missing) = process_snapshot(&captured)?;
-            let result = result_for(&captured, completed, missing)?;
+            let (completed, missing, skipped_filter) = process_snapshot(&captured)?;
+            let result = result_for(&captured, completed, missing, skipped_filter)?;
             write_new(&done, &result)?;
             fs::remove_file(working)?;
             result
@@ -493,5 +516,21 @@ mod tests {
         verify_command(&command, &config).unwrap();
         command.body.profile = "other".to_owned();
         assert!(verify_command(&command, &config).is_err());
+    }
+
+    #[test]
+    fn old_signed_results_still_verify() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
+        let old_body = r#"{"version":1,"device_id":"target","profile":"clean","nonce":"job","files_completed":2,"files_missing":0,"completed_unix_seconds":42}"#;
+        let mut signed_bytes = RESULT_DOMAIN.to_vec();
+        signed_bytes.extend_from_slice(old_body.as_bytes());
+        let signature = key.sign(&signed_bytes);
+        let result = SignedResult {
+            body: serde_json::from_str(old_body).unwrap(),
+            public_key: hex(&key.verifying_key().to_bytes()),
+            signature: hex(&signature.to_bytes()),
+        };
+        assert_eq!(result.body.files_skipped_filter, 0);
+        verify_signed_result(&result, &result.public_key).unwrap();
     }
 }

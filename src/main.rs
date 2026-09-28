@@ -2,11 +2,13 @@
 #[cfg(not(windows))]
 compile_error!("Zero currently supports Windows only.");
 
+mod filters;
 mod profiles;
 mod receipts;
 mod remote;
 
 use aes_gcm::{Aes256Gcm, Nonce, aead::AeadInOut, aead::KeyInit};
+use filters::FileFilters;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -18,6 +20,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use zeroize::{Zeroize, Zeroizing};
 
 const MAGIC: &[u8; 8] = b"ZEROFMT2";
@@ -182,12 +185,13 @@ fn run() -> AppResult<()> {
             show_dialog(
                 "Zero",
                 &format!(
-                    "Authenticated result for {}.\n\nJob ID: {}\nProfile: {}\nFiles completed: {}\nFiles missing on retry: {}\nCompleted at Unix time: {}\n\nThis verifies the signed app result, not physical media erasure.",
+                    "Authenticated result for {}.\n\nJob ID: {}\nProfile: {}\nFiles completed: {}\nFiles missing on retry: {}\nFiles skipped by filters: {}\nCompleted at Unix time: {}\n\nThis verifies the signed app result, not physical media erasure.",
                     body.device_id,
                     body.nonce,
                     body.profile,
                     body.files_completed,
                     body.files_missing,
+                    body.files_skipped_filter,
                     body.completed_unix_seconds
                 ),
             );
@@ -198,17 +202,49 @@ fn run() -> AppResult<()> {
         args.next();
         let name = args.next().ok_or("profile name is required")?;
         let name = name.to_str().ok_or("profile name must be Unicode")?;
-        let receipt_dir = if args.peek().is_some_and(|arg| arg == "--receipts") {
-            args.next();
-            Some(PathBuf::from(
-                args.next().ok_or("receipt directory is required")?,
-            ))
-        } else {
-            None
-        };
+        let mut receipt_dir = None;
+        let mut filters = FileFilters::default();
+        while let Some(option) = args.peek().and_then(|arg| arg.to_str()) {
+            match option {
+                "--receipts" => {
+                    args.next();
+                    if receipt_dir.is_some() {
+                        return Err("receipt directory was specified twice".into());
+                    }
+                    receipt_dir = Some(PathBuf::from(
+                        args.next().ok_or("receipt directory is required")?,
+                    ));
+                }
+                "--include-ext" => {
+                    args.next();
+                    let values = args.next().ok_or("extension list is required")?;
+                    let values = values.to_str().ok_or("extensions must be Unicode")?;
+                    for extension in values.split(',') {
+                        filters.add_extension(extension)?;
+                    }
+                }
+                "--older-than-days" => {
+                    args.next();
+                    if filters.older_than_days.is_some() {
+                        return Err("file age was specified twice".into());
+                    }
+                    let value = args.next().ok_or("file age in days is required")?;
+                    filters.older_than_days =
+                        Some(value.to_str().ok_or("file age must be Unicode")?.parse()?);
+                }
+                "--exclude-name" => {
+                    args.next();
+                    let pattern = args.next().ok_or("name exclusion is required")?;
+                    filters
+                        .add_exclusion(pattern.to_str().ok_or("name exclusion must be Unicode")?)?;
+                }
+                _ => break,
+            }
+        }
+        filters.validate()?;
         let selected: Vec<PathBuf> = args.map(PathBuf::from).collect();
-        let _ = collect_selection(&selected)?;
-        let path = profiles::create(name, &selected, receipt_dir.as_deref())?;
+        let _ = collect_selection(&selected, Some(&filters), true)?;
+        let path = profiles::create(name, &selected, receipt_dir.as_deref(), &filters)?;
         if !quiet {
             show_dialog(
                 "Zero",
@@ -218,6 +254,54 @@ fn run() -> AppResult<()> {
                 ),
             );
         }
+        return Ok(());
+    }
+    if args.peek().is_some_and(|arg| arg == "--preview-profile") {
+        args.next();
+        let name = args.next().ok_or("profile name is required")?;
+        if args.next().is_some() {
+            return Err("too many profile-preview arguments".into());
+        }
+        if quiet {
+            return Err("profile preview needs a visible dialog; omit --quiet".into());
+        }
+        let name = name.to_str().ok_or("profile name must be Unicode")?;
+        let profile = profiles::load(name)?;
+        let source_count = profile.paths.len();
+        let sources: Vec<PathBuf> = profile
+            .paths
+            .into_iter()
+            .filter(|path| path.exists())
+            .collect();
+        let (files, _, skipped) = collect_selection(&sources, Some(&profile.filters), true)?;
+        let mut listed = files
+            .iter()
+            .take(15)
+            .map(|file| {
+                let path = file.path.to_string_lossy();
+                let mut short: String = path.chars().take(160).collect();
+                if path.chars().count() > 160 {
+                    short.push_str("...");
+                }
+                short
+            })
+            .collect::<Vec<_>>();
+        if files.len() > listed.len() {
+            listed.push(format!("... and {} more", files.len() - listed.len()));
+        }
+        show_dialog(
+            "Zero profile preview",
+            &format!(
+                "Profile: {name}\nMatching files: {}\nSkipped by filters: {skipped}\nMissing selected paths: {}\n\n{}\n\nPreview only. No file was encrypted or deleted.",
+                files.len(),
+                source_count - sources.len(),
+                if listed.is_empty() {
+                    "(no matching files)".to_owned()
+                } else {
+                    listed.join("\n")
+                }
+            ),
+        );
         return Ok(());
     }
     if args.peek().is_some_and(|arg| arg == "--schedule") {
@@ -280,7 +364,7 @@ fn run() -> AppResult<()> {
         );
     }
     let mut from_profile = false;
-    let (sources, receipt_dir) = if args.peek().is_some_and(|arg| arg == "--profile") {
+    let (sources, receipt_dir, filters) = if args.peek().is_some_and(|arg| arg == "--profile") {
         args.next();
         let name = args.next().ok_or("profile name is required")?;
         if args.next().is_some() {
@@ -288,7 +372,8 @@ fn run() -> AppResult<()> {
         }
         let name = name.to_str().ok_or("profile name must be Unicode")?;
         from_profile = true;
-        profiles::load(name)?
+        let profile = profiles::load(name)?;
+        (profile.paths, profile.receipt_directory, profile.filters)
     } else {
         let receipt_dir = if args.peek().is_some_and(|arg| arg == "--receipts") {
             args.next();
@@ -298,7 +383,11 @@ fn run() -> AppResult<()> {
         } else {
             None
         };
-        (args.map(PathBuf::from).collect(), receipt_dir)
+        (
+            args.map(PathBuf::from).collect(),
+            receipt_dir,
+            FileFilters::default(),
+        )
     };
     recover_pending_jobs(&state_directory()?)?;
     let sources: Vec<PathBuf> = if from_profile {
@@ -318,7 +407,11 @@ fn run() -> AppResult<()> {
     if sources.len() > 32 {
         return Err("select at most 32 files or folders per drop".into());
     }
-    let (files, folders) = collect_selection(&sources)?;
+    let (files, folders, skipped_by_filter) = collect_selection(
+        &sources,
+        if from_profile { Some(&filters) } else { None },
+        false,
+    )?;
     if let Some(dir) = &receipt_dir {
         let absolute = std::path::absolute(dir)?;
         let receipt_name = absolute.to_string_lossy().to_lowercase();
@@ -330,15 +423,27 @@ fn run() -> AppResult<()> {
         }
     }
 
-    for (index, selected) in files.iter().enumerate() {
-        let original_bytes = process_one_with_identity(&selected.path, selected.identity).map_err(|error| {
+    let mut completed = 0;
+    let mut skipped_after_inspection = 0;
+    for selected in &files {
+        let result = process_one_with_filter(
+            &selected.path,
+            selected.identity,
+            if from_profile { Some(&filters) } else { None },
+        )
+        .map_err(|error| {
             format!(
                 "{}: {error}\n\n{} earlier file(s) completed. This file may be partly encrypted or overwritten if the error occurred after staging.",
-                selected.path.display(), index
+                selected.path.display(), completed
             )
         })?;
-        if let Some(dir) = &receipt_dir {
-            receipts::write_receipt(&selected.path, original_bytes, dir)?;
+        if let Some(original_bytes) = result {
+            if let Some(dir) = &receipt_dir {
+                receipts::write_receipt(&selected.path, original_bytes, dir)?;
+            }
+            completed += 1;
+        } else {
+            skipped_after_inspection += 1;
         }
     }
     if !from_profile {
@@ -347,11 +452,18 @@ fn run() -> AppResult<()> {
         }
     }
     if !quiet {
+        let filter_note = if from_profile {
+            format!(
+                "\n\nSkipped {} file(s) by profile filters.",
+                skipped_by_filter + skipped_after_inspection
+            )
+        } else {
+            String::new()
+        };
         show_dialog(
             "Zero",
             &format!(
-                "Processed {} selected file(s).\n\nNo encrypted files or keys were retained. The selected originals were overwritten and deleted. Backups, snapshots, and old storage blocks may remain.",
-                files.len()
+                "Processed {completed} selected file(s).\n\nNo encrypted files or keys were retained. The selected originals were overwritten and deleted. Backups, snapshots, and old storage blocks may remain.{filter_note}"
             ),
         );
     }
@@ -363,7 +475,11 @@ struct SelectedFile {
     identity: FileIdentity,
 }
 
-fn collect_selection(sources: &[PathBuf]) -> AppResult<(Vec<SelectedFile>, Vec<PathBuf>)> {
+fn collect_selection(
+    sources: &[PathBuf],
+    filters: Option<&FileFilters>,
+    read_only: bool,
+) -> AppResult<(Vec<SelectedFile>, Vec<PathBuf>, usize)> {
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
     const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
     const FILE_ATTRIBUTE_SYSTEM: u32 = 0x0000_0004;
@@ -372,8 +488,13 @@ fn collect_selection(sources: &[PathBuf]) -> AppResult<(Vec<SelectedFile>, Vec<P
     let mut files = Vec::new();
     let mut folders = Vec::new();
     let mut seen = HashSet::new();
+    let mut visited_files = 0;
+    let mut skipped_by_filter = 0;
+    let inspected_at = SystemTime::now();
     let state_dir = state_directory()?;
-    fs::create_dir_all(&state_dir)?;
+    if !read_only {
+        fs::create_dir_all(&state_dir)?;
+    }
     let protected = [state_dir, env::current_exe()?]
         .into_iter()
         .map(|path| {
@@ -431,13 +552,24 @@ fn collect_selection(sources: &[PathBuf]) -> AppResult<(Vec<SelectedFile>, Vec<P
             children.sort();
             pending.extend(children.into_iter().rev());
         } else if metadata.is_file() {
-            let inspected = open_for_destroy(&path)?;
+            visited_files += 1;
+            if visited_files > MAX_FILES {
+                return Err("selection exceeds 100,000 files".into());
+            }
+            if let Some(filter) = filters
+                && !filter.matches(&path, &metadata, inspected_at)?
+            {
+                skipped_by_filter += 1;
+                continue;
+            }
+            let inspected = if read_only {
+                open_for_preview(&path)?
+            } else {
+                open_for_destroy(&path)?
+            };
             let identity = file_identity(&inspected)?;
             drop(inspected);
             files.push(SelectedFile { path, identity });
-            if files.len() > MAX_FILES {
-                return Err("selection exceeds 100,000 files".into());
-            }
         } else {
             return Err(format!(
                 "only ordinary files and folders are supported: {}",
@@ -447,13 +579,31 @@ fn collect_selection(sources: &[PathBuf]) -> AppResult<(Vec<SelectedFile>, Vec<P
         }
     }
     folders.sort_by_key(|path| path.components().count());
-    Ok((files, folders))
+    Ok((files, folders, skipped_by_filter))
 }
 
+#[cfg(test)]
 fn process_one_with_identity(source: &Path, expected: FileIdentity) -> AppResult<u64> {
+    process_one_with_filter(source, expected, None)?.ok_or_else(|| {
+        "an unfiltered selected file was skipped unexpectedly"
+            .to_owned()
+            .into()
+    })
+}
+
+fn process_one_with_filter(
+    source: &Path,
+    expected: FileIdentity,
+    filters: Option<&FileFilters>,
+) -> AppResult<Option<u64>> {
     let mut file = open_for_destroy(source)?;
     if file_identity(&file)? != expected {
         return Err(format!("selected file changed: {}", source.display()).into());
+    }
+    if let Some(filter) = filters
+        && !filter.matches(source, &file.metadata()?, SystemTime::now())?
+    {
+        return Ok(None);
     }
     let original_bytes = file.metadata()?.len();
     let mut key = Zeroizing::new([0u8; 32]);
@@ -471,7 +621,7 @@ fn process_one_with_identity(source: &Path, expected: FileIdentity) -> AppResult
     }
     overwrite_and_delete(file, source)?;
     journal.complete()?;
-    Ok(original_bytes)
+    Ok(Some(original_bytes))
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -642,19 +792,22 @@ fn show_dialog(title: &str, message: &str) {
     unsafe { MessageBoxW(std::ptr::null_mut(), message.as_ptr(), title.as_ptr(), 0x40) };
 }
 
+fn open_for_preview(source: &Path) -> AppResult<File> {
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(source)?;
+    validate_file_handle(&file)?;
+    Ok(file)
+}
+
 fn open_for_destroy(source: &Path) -> AppResult<File> {
     const GENERIC_READ: u32 = 0x8000_0000;
     const GENERIC_WRITE: u32 = 0x4000_0000;
     const DELETE: u32 = 0x0001_0000;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    const UNSUPPORTED_ATTRIBUTES: u32 = 0x0040_0000 // recall on data access
-        | 0x0004_0000 // recall on open
-        | 0x0000_4000 // EFS encryption
-        | 0x0000_1000 // offline
-        | 0x0000_0800 // compressed
-        | 0x0000_0400 // reparse point
-        | 0x0000_0200; // sparse
-
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -662,14 +815,26 @@ fn open_for_destroy(source: &Path) -> AppResult<File> {
         .share_mode(0)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(source)?;
+    validate_file_handle(&file)?;
+    Ok(file)
+}
+
+fn validate_file_handle(file: &File) -> AppResult<()> {
+    const UNSUPPORTED_ATTRIBUTES: u32 = 0x0040_0000 // recall on data access
+        | 0x0004_0000 // recall on open
+        | 0x0000_4000 // EFS encryption
+        | 0x0000_1000 // offline
+        | 0x0000_0800 // compressed
+        | 0x0000_0400 // reparse point
+        | 0x0000_0200; // sparse
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.file_attributes() & UNSUPPORTED_ATTRIBUTES != 0 {
         return Err("this file type is not supported for cleanup".into());
     }
-    if hard_link_count(&file)? != 1 {
+    if hard_link_count(file)? != 1 {
         return Err("files with another hard link are refused".into());
     }
-    Ok(file)
+    Ok(())
 }
 
 #[repr(C)]
@@ -1082,7 +1247,8 @@ mod tests {
         fs::write(selected.join("a.txt"), b"a").unwrap();
         fs::write(nested.join("b.txt"), b"b").unwrap();
         fs::write(&untouched, b"keep").unwrap();
-        let (files, folders) = collect_selection(std::slice::from_ref(&selected)).unwrap();
+        let (files, folders, _) =
+            collect_selection(std::slice::from_ref(&selected), None, false).unwrap();
         assert_eq!(files.len(), 2);
         assert_eq!(folders.len(), 2);
         for file in files {
@@ -1097,12 +1263,94 @@ mod tests {
     }
 
     #[test]
+    fn profile_filters_select_only_matching_files_and_preview_is_read_only() {
+        let root = test_root("filters");
+        let selected = root.join("selected");
+        fs::create_dir_all(&selected).unwrap();
+        let target = selected.join("old.LOG");
+        let wrong_extension = selected.join("old.txt");
+        let excluded = selected.join("keep-old.log");
+        let too_recent = selected.join("recent.log");
+        for path in [&target, &wrong_extension, &excluded, &too_recent] {
+            fs::write(path, b"test content").unwrap();
+        }
+        let old = SystemTime::now() - std::time::Duration::from_secs(3 * 86_400);
+        for path in [&target, &wrong_extension, &excluded] {
+            File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+        let mut filters = FileFilters::default();
+        filters.add_extension("log").unwrap();
+        filters.older_than_days = Some(2);
+        filters.add_exclusion("keep*").unwrap();
+        let (preview, _, skipped) =
+            collect_selection(std::slice::from_ref(&selected), Some(&filters), true).unwrap();
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].path, target);
+        assert_eq!(skipped, 3);
+        assert_eq!(fs::read(&target).unwrap(), b"test content");
+        let (files, _, skipped) =
+            collect_selection(std::slice::from_ref(&selected), Some(&filters), false).unwrap();
+        assert_eq!(skipped, 3);
+        assert_eq!(files.len(), 1);
+        assert!(
+            process_one_with_filter(&files[0].path, files[0].identity, Some(&filters))
+                .unwrap()
+                .is_some()
+        );
+        assert!(!target.exists());
+        for path in [&wrong_extension, &excluded, &too_recent] {
+            assert_eq!(fs::read(path).unwrap(), b"test content");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_filter_is_rechecked_before_processing() {
+        let root = test_root("filter-recheck");
+        let selected = root.join("old.log");
+        fs::write(&selected, b"leave this file").unwrap();
+        let old = SystemTime::now() - std::time::Duration::from_secs(3 * 86_400);
+        File::options()
+            .write(true)
+            .open(&selected)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        let filters = FileFilters {
+            older_than_days: Some(2),
+            ..FileFilters::default()
+        };
+        let (files, _, _) =
+            collect_selection(std::slice::from_ref(&selected), Some(&filters), false).unwrap();
+        assert_eq!(files.len(), 1);
+        File::options()
+            .write(true)
+            .open(&selected)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(SystemTime::now()))
+            .unwrap();
+        assert!(
+            process_one_with_filter(&selected, files[0].identity, Some(&filters))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fs::read(&selected).unwrap(), b"leave this file");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replacement_after_preflight_is_refused_before_processing() {
         let root = test_root("replacement");
         let selected = root.join("selected.txt");
         let original = root.join("moved-original.txt");
         fs::write(&selected, b"original selected file").unwrap();
-        let (files, _) = collect_selection(std::slice::from_ref(&selected)).unwrap();
+        let (files, _, _) =
+            collect_selection(std::slice::from_ref(&selected), None, false).unwrap();
         fs::rename(&selected, &original).unwrap();
         fs::write(&selected, b"replacement file").unwrap();
         assert!(process_one_with_identity(&files[0].path, files[0].identity).is_err());

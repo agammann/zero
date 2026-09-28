@@ -20,12 +20,23 @@ Create a named profile without changing the selected files, then run or schedule
 
 ```powershell
 .\Zero.exe --create-profile DownloadsClean "D:\Drop Folder"
+.\Zero.exe --preview-profile DownloadsClean
 .\Zero.exe --profile DownloadsClean
 .\Zero.exe --schedule DownloadsClean daily 23:30
 .\Zero.exe --unschedule DownloadsClean
 ```
 
 Scheduling uses Windows Task Scheduler under the current user. Cadences are `daily`, `weekdays`, or `every-N` for 1–30 days, followed by local `HH:MM` time. A profile keeps its selected folders in place so a later scheduled run can process newly added files. Files absent when the task runs are skipped. Task failures can be inspected in `last-error.txt` and Task Scheduler. A scheduled run has no confirmation prompt.
+
+Filters are optional when creating a saved profile. This example includes `.log` and `.tmp` files last modified at least 30 days ago, except names starting with `keep`:
+
+```powershell
+.\Zero.exe --create-profile OldLogs --include-ext .log,.tmp --older-than-days 30 --exclude-name "keep*" "D:\Drop Folder"
+.\Zero.exe --preview-profile OldLogs
+.\Zero.exe --profile OldLogs
+```
+
+`--include-ext` accepts a comma-separated list and may be repeated; matching is case-insensitive. `--exclude-name` may be repeated and matches the file name, not its parent path; `*` matches any sequence and `?` matches one character. `--older-than-days` uses the file's last-modified time and full 24-hour days. Omit any option to leave that rule off. The preview reads the current selection, shows up to 15 matching paths and counts skipped files, and does not encrypt or delete anything. It can be run again before scheduling. Profiles created by earlier versions stay unfiltered. Direct drag-and-drop remains literal; filters apply only to saved profiles and are checked again immediately before each file is processed. A scheduled or remote run may see a different matching set from the preview if files have changed.
 
 ## Optional signed receipts
 
@@ -42,7 +53,7 @@ The receipt signing key is a separate, persistent Ed25519 key protected for the 
 
 ## Authenticated remote jobs
 
-Zero can use a shared directory as a job queue. This may be a user-managed sync folder or SMB share; Zero provides no hosted relay. The controller signs a request for a device and one pre-enrolled profile. The target's one-minute Windows task verifies the controller signature and local allowlist, records the exact selected file identities for restart, processes them, and signs a result. A completed job ID is recorded locally so replaying the same request does not process newly added files.
+Zero can use a shared directory as a job queue. This may be a user-managed sync folder or SMB share; Zero provides no hosted relay. The controller signs a request for a device and one pre-enrolled profile. The target's one-minute Windows task verifies the controller signature and local allowlist, applies the target's saved-profile filters, records the exact selected file identities for restart, processes them, and signs a result. A completed job ID is recorded locally so replaying the same request does not process newly added files.
 
 On the controller:
 
@@ -65,7 +76,7 @@ Back on the controller, trust the target public key through a separate channel, 
 .\Zero.exe --verify-result "D:\Shared Zero Queue\LaptopA\results\result-JOBID.json" "D:\target-public.hex"
 ```
 
-Run `--agent` manually to poll once, or `--remove-agent` on the target to remove its scheduled poller and enrollment. The queue must reach the target for delivery. Anyone who can control the queue can delay or delete jobs and results, but cannot authorize a different profile without the enrolled controller signing key. The target profile and its files are controlled by the target Windows user. A signed result reports the app's actions and files missing on retry; it is not a physical erasure certificate. See [remote job design](REMOTE_JOBS.md).
+Run `--agent` manually to poll once, or `--remove-agent` on the target to remove its scheduled poller and enrollment. The queue must reach the target for delivery. Anyone who can control the queue can delay or delete jobs and results, but cannot authorize a different profile without the enrolled controller signing key. The target profile and its files are controlled by the target Windows user. A signed result reports the app's actions, files missing on retry, and files skipped because they no longer match filters; it is not a physical erasure certificate. See [remote job design](REMOTE_JOBS.md).
 
 ## Build and test
 
@@ -75,6 +86,6 @@ Install a current Rust toolchain for Windows and run:
 .\build-windows.ps1
 ```
 
-The script tests and builds `Zero.exe`. `Cargo.lock` pins dependencies. The source includes tests for AES-256-GCM staging, ciphertext readback, folder selection, interruption recovery, receipt signatures, and remote authorization. See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled Rust dependencies.
+The script tests and builds `Zero.exe`. `Cargo.lock` pins dependencies. The source includes tests for AES-256-GCM staging, ciphertext readback, folder selection, profile filters, interruption recovery, receipt signatures, and remote authorization. See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled Rust dependencies.
 
 Zero is available under the [MIT License](LICENSE).

@@ -1,3 +1,4 @@
+use crate::filters::FileFilters;
 use crate::{AppResult, state_directory};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -12,6 +13,14 @@ pub struct Profile {
     version: u8,
     paths: Vec<Vec<u16>>,
     receipt_directory: Option<Vec<u16>>,
+    #[serde(default)]
+    filters: FileFilters,
+}
+
+pub struct LoadedProfile {
+    pub paths: Vec<PathBuf>,
+    pub receipt_directory: Option<PathBuf>,
+    pub filters: FileFilters,
 }
 
 fn valid_name(name: &str) -> bool {
@@ -29,15 +38,21 @@ fn profile_path(state: &Path, name: &str) -> AppResult<PathBuf> {
     Ok(state.join("profiles").join(format!("{name}.json")))
 }
 
-pub fn create(name: &str, paths: &[PathBuf], receipts: Option<&Path>) -> AppResult<PathBuf> {
+pub fn create(
+    name: &str,
+    paths: &[PathBuf],
+    receipts: Option<&Path>,
+    filters: &FileFilters,
+) -> AppResult<PathBuf> {
     if paths.is_empty() || paths.len() > 32 {
         return Err("a profile needs 1-32 explicitly selected paths".into());
     }
+    filters.validate()?;
     let state = state_directory()?;
     let path = profile_path(&state, name)?;
     fs::create_dir_all(path.parent().ok_or("profile directory is unavailable")?)?;
     let profile = Profile {
-        version: 1,
+        version: 2,
         paths: paths
             .iter()
             .map(|selected| {
@@ -51,6 +66,7 @@ pub fn create(name: &str, paths: &[PathBuf], receipts: Option<&Path>) -> AppResu
                     .map(|absolute| absolute.as_os_str().encode_wide().collect())
             })
             .transpose()?,
+        filters: filters.clone(),
     };
     for encoded in &profile.paths {
         if encoded.len() > 16_384 {
@@ -67,15 +83,28 @@ pub fn create(name: &str, paths: &[PathBuf], receipts: Option<&Path>) -> AppResu
     Ok(path)
 }
 
-pub fn load(name: &str) -> AppResult<(Vec<PathBuf>, Option<PathBuf>)> {
+pub fn load(name: &str) -> AppResult<LoadedProfile> {
     let path = profile_path(&state_directory()?, name)?;
     let file = fs::File::open(path)?;
     if file.metadata()?.len() > 1024 * 1024 {
         return Err("profile is too large".into());
     }
     let profile: Profile = serde_json::from_reader(file)?;
-    if profile.version != 1 || profile.paths.is_empty() || profile.paths.len() > 32 {
+    if !(1..=2).contains(&profile.version)
+        || profile.paths.is_empty()
+        || profile.paths.len() > 32
+        || (profile.version == 1 && profile.filters != FileFilters::default())
+    {
         return Err("profile format is unsupported".into());
+    }
+    profile.filters.validate()?;
+    if profile.paths.iter().any(|encoded| encoded.len() > 16_384)
+        || profile
+            .receipt_directory
+            .as_ref()
+            .is_some_and(|encoded| encoded.len() > 16_384)
+    {
+        return Err("profile path is too long".into());
     }
     let paths = profile
         .paths
@@ -85,7 +114,11 @@ pub fn load(name: &str) -> AppResult<(Vec<PathBuf>, Option<PathBuf>)> {
     let receipts = profile
         .receipt_directory
         .map(|encoded| PathBuf::from(OsString::from_wide(&encoded)));
-    Ok((paths, receipts))
+    Ok(LoadedProfile {
+        paths,
+        receipt_directory: receipts,
+        filters: profile.filters,
+    })
 }
 
 pub fn list() -> AppResult<Vec<String>> {
@@ -190,5 +223,13 @@ mod tests {
         assert!(!valid_name("../other"));
         assert!(!valid_name("name with space"));
         assert!(!valid_name(""));
+    }
+
+    #[test]
+    fn old_profiles_load_without_filters() {
+        let legacy = r#"{"version":1,"paths":[[67,58,92,120]],"receipt_directory":null}"#;
+        let profile: Profile = serde_json::from_str(legacy).unwrap();
+        assert_eq!(profile.version, 1);
+        assert_eq!(profile.filters, FileFilters::default());
     }
 }

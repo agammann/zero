@@ -1,10 +1,10 @@
 # Zero: storage and key model
 
-This document describes version 0.3.1's implemented file-level sequence. It is not a certification that every historical copy is gone.
+This document describes version 0.4.0's implemented file-level sequence. It is not a certification that every historical copy is gone.
 
 ## Per-file sequence
 
-1. Inspect all selected paths before changing the first file and record each selected file identity. Refuse reparse points, unsupported attributes, files with other hard links, and selections containing Zero's executable or state directory. Open each file with exclusive read, write, and delete access when processing it, then require the opened handle to match the identity captured during inspection.
+1. Inspect all selected paths before changing the first file and record each selected file identity. For a saved profile, include only files matching its optional extension, modified-age, and filename-exclusion rules. Refuse reparse points, unsupported attributes, files with other hard links, and selections containing Zero's executable or state directory. Open each file with exclusive read, write, and delete access when processing it, then require the opened handle to match the identity captured during inspection. Recheck profile filters against the opened file immediately before processing.
 2. Obtain a fresh 256-bit AES key and nonce prefix from the operating-system random source. Keep the working key in process memory. No file-specific key file, account, or remote key service is used.
 3. Create a uniquely named stage in the source directory using `FILE_FLAG_DELETE_ON_CLOSE`. Encrypt source chunks with AES-256-GCM. Write the header, ciphertext, lengths, and authentication tags; no plaintext is written to the stage. Chunk and final-frame authentication bind the stream to its header and order.
 4. Flush the stage. Read and authenticate every frame and compare recovered bytes against the selected original. Recovered plaintext remains in temporary process memory.
@@ -18,9 +18,10 @@ After success, no encrypted file or per-file AES key is intentionally retained. 
 
 - An ordinary error before the recovery record leaves the source's current logical bytes unchanged; closing the stage removes it.
 - Once a recovery record exists, the next Zero run attempts to finish by overwriting and deleting the exact same file identity. This avoids leaving a partly encrypted original after an interruption. It does not reconstruct or resume the AES operation.
+- Recovery of an already-started operation finishes independently of current profile filters, because that selected file may already contain partial ciphertext.
 - If a file identity changes, a file is inaccessible, storage fails, or a recovery record is corrupt, Zero stops and keeps that record for inspection. It does not silently process a replacement path.
 - A sudden power loss, filesystem damage, or storage/controller behavior can defeat cleanup. Windows delete-on-close is a process-lifetime behavior, not a power-loss guarantee.
-- A multi-file batch stops at the first error. Earlier files remain processed. For scheduled or remote jobs, the snapshot and local records support retry; a remote result distinguishes files processed during the latest attempt from paths missing on retry.
+- A multi-file batch stops at the first error. Earlier files remain processed. For scheduled or remote jobs, the snapshot and local records support retry; a remote result distinguishes files processed during the latest attempt, paths missing on retry, and files skipped because their filters no longer match.
 
 ## What storage checks prove
 
