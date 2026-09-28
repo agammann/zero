@@ -2,12 +2,20 @@
 #[cfg(not(windows))]
 compile_error!("Zero currently supports Windows only.");
 
+mod profiles;
+mod receipts;
+mod remote;
+mod volume;
+
 use aes_gcm::{Aes256Gcm, Nonce, aead::AeadInOut, aead::KeyInit};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::env;
 use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
@@ -20,70 +28,591 @@ const TAG_SIZE: usize = 16;
 type AppResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 fn main() {
-    if let Err(error) = run() {
-        show_dialog("Zero", &format!("Operation stopped:\n\n{error}"));
-        std::process::exit(1);
+    let quiet = env::args_os().nth(1).is_some_and(|arg| arg == "--quiet");
+    match run() {
+        Ok(()) => {
+            if quiet && let Ok(dir) = state_directory() {
+                let _ = fs::remove_file(dir.join("last-error.txt"));
+            }
+        }
+        Err(error) => {
+            if quiet {
+                if let Ok(dir) = state_directory() {
+                    let _ = fs::create_dir_all(&dir);
+                    let _ = fs::write(dir.join("last-error.txt"), error.to_string());
+                }
+            } else {
+                show_dialog("Zero", &format!("Operation stopped:\n\n{error}"));
+            }
+            std::process::exit(1);
+        }
     }
 }
 
 fn run() -> AppResult<()> {
-    let sources: Vec<PathBuf> = env::args_os().skip(1).map(PathBuf::from).collect();
-    if sources.is_empty() {
-        show_dialog(
-            "Zero",
-            "Drag up to 32 individual files onto this executable in Windows Explorer.\n\nEach selected file is encrypted on disk with AES-256-GCM, verified, and then its working key is cleared. The file is overwritten and deleted. Nothing is retained after success. There is no confirmation prompt.",
-        );
+    let mut args = env::args_os().skip(1).peekable();
+    let quiet = args.peek().is_some_and(|arg| arg == "--quiet");
+    if quiet {
+        args.next();
+    }
+    if args.peek().is_some_and(|arg| arg == "--verify-receipt") {
+        args.next();
+        let path = PathBuf::from(args.next().ok_or("receipt path is required")?);
+        let public_key_path =
+            PathBuf::from(args.next().ok_or("trusted public key path is required")?);
+        if args.next().is_some() {
+            return Err("too many receipt verification arguments".into());
+        }
+        let key = fs::read_to_string(public_key_path)?;
+        let body = receipts::verify_receipt(&path, &key)?;
+        if !quiet {
+            show_dialog(
+                "Zero",
+                &format!(
+                    "Receipt signature is valid.\n\nSelected path: {}\nOriginal bytes: {}\nCompleted at Unix time: {}\n\nThis verifies the record's signature, not physical media erasure.",
+                    body.selected_path, body.original_bytes, body.completed_unix_seconds
+                ),
+            );
+        }
         return Ok(());
     }
-    if sources.len() > 32 {
-        return Err("select at most 32 individual files per drop".into());
+    if args.peek().is_some_and(|arg| arg == "--export-key") {
+        args.next();
+        let path = PathBuf::from(args.next().ok_or("public key export path is required")?);
+        if args.next().is_some() {
+            return Err("too many key export arguments".into());
+        }
+        remote::export_public_key(&path)?;
+        if !quiet {
+            show_dialog(
+                "Zero",
+                &format!(
+                    "Public key exported to {}. Keep this file's origin verifiable when transferring it to a device.",
+                    path.display()
+                ),
+            );
+        }
+        return Ok(());
     }
-    for source in &sources {
-        let info = fs::symlink_metadata(source)?;
-        if info.file_type().is_symlink() || !info.is_file() {
-            return Err(format!(
-                "only individual regular files may be selected: {}",
-                source.display()
-            )
-            .into());
+    if args.peek().is_some_and(|arg| arg == "--enroll") {
+        args.next();
+        let device = args.next().ok_or("device ID is required")?;
+        let queue = PathBuf::from(args.next().ok_or("shared queue directory is required")?);
+        let controller_key = PathBuf::from(
+            args.next()
+                .ok_or("controller public key path is required")?,
+        );
+        let allowed: Vec<String> = args
+            .map(|arg| {
+                arg.into_string()
+                    .map_err(|_| "profile names must be Unicode")
+            })
+            .collect::<Result<_, _>>()?;
+        let device = device.to_str().ok_or("device ID must be Unicode")?;
+        remote::enroll(device, &queue, &controller_key, &allowed)?;
+        if !quiet {
+            show_dialog(
+                "Zero",
+                &format!(
+                    "Device {device} enrolled for {} saved profile(s). A one-minute Windows task now checks the shared queue for authenticated jobs.",
+                    allowed.len()
+                ),
+            );
+        }
+        return Ok(());
+    }
+    if args.peek().is_some_and(|arg| arg == "--remove-agent") {
+        args.next();
+        if args.next().is_some() {
+            return Err("too many agent removal arguments".into());
+        }
+        remote::remove_agent()?;
+        if !quiet {
+            show_dialog("Zero", "Remote agent schedule and enrollment removed.");
+        }
+        return Ok(());
+    }
+    if args.peek().is_some_and(|arg| arg == "--agent") {
+        args.next();
+        if args.next().is_some() {
+            return Err("too many remote agent arguments".into());
+        }
+        recover_pending_jobs(&state_directory()?)?;
+        let count = remote::poll_once()?;
+        if !quiet {
+            show_dialog(
+                "Zero",
+                &format!("Processed {count} authenticated remote job(s)."),
+            );
+        }
+        return Ok(());
+    }
+    if args.peek().is_some_and(|arg| arg == "--send") {
+        args.next();
+        let queue = PathBuf::from(args.next().ok_or("shared queue directory is required")?);
+        let device = args.next().ok_or("device ID is required")?;
+        let profile = args.next().ok_or("profile name is required")?;
+        if args.next().is_some() {
+            return Err("too many remote send arguments".into());
+        }
+        let device = device.to_str().ok_or("device ID must be Unicode")?;
+        let profile = profile.to_str().ok_or("profile name must be Unicode")?;
+        let nonce = remote::send(&queue, device, profile)?;
+        if !quiet {
+            show_dialog(
+                "Zero",
+                &format!(
+                    "Signed job queued for {device}.\n\nProfile: {profile}\nJob ID: {nonce}\n\nDelivery depends on the shared queue reaching the enrolled device."
+                ),
+            );
+        }
+        return Ok(());
+    }
+    if args.peek().is_some_and(|arg| arg == "--verify-result") {
+        args.next();
+        let result = PathBuf::from(args.next().ok_or("remote result path is required")?);
+        let public_key = PathBuf::from(
+            args.next()
+                .ok_or("trusted device public key path is required")?,
+        );
+        if args.next().is_some() {
+            return Err("too many result verification arguments".into());
+        }
+        let body = remote::verify_result(&result, &public_key)?;
+        if !quiet {
+            show_dialog(
+                "Zero",
+                &format!(
+                    "Authenticated result for {}.\n\nJob ID: {}\nProfile: {}\nFiles completed: {}\nFiles missing on retry: {}\nCompleted at Unix time: {}\n\nThis verifies the signed app result, not physical media erasure.",
+                    body.device_id,
+                    body.nonce,
+                    body.profile,
+                    body.files_completed,
+                    body.files_missing,
+                    body.completed_unix_seconds
+                ),
+            );
+        }
+        return Ok(());
+    }
+    if args.peek().is_some_and(|arg| arg == "--create-profile") {
+        args.next();
+        let name = args.next().ok_or("profile name is required")?;
+        let name = name.to_str().ok_or("profile name must be Unicode")?;
+        let receipt_dir = if args.peek().is_some_and(|arg| arg == "--receipts") {
+            args.next();
+            Some(PathBuf::from(
+                args.next().ok_or("receipt directory is required")?,
+            ))
+        } else {
+            None
+        };
+        let selected: Vec<PathBuf> = args.map(PathBuf::from).collect();
+        let _ = collect_selection(&selected)?;
+        let path = profiles::create(name, &selected, receipt_dir.as_deref())?;
+        if !quiet {
+            show_dialog(
+                "Zero",
+                &format!(
+                    "Profile {name} saved at {}.\n\nNothing was deleted. Schedule or run this profile when ready.",
+                    path.display()
+                ),
+            );
+        }
+        return Ok(());
+    }
+    if args.peek().is_some_and(|arg| arg == "--schedule") {
+        args.next();
+        let name = args.next().ok_or("profile name is required")?;
+        let cadence = args.next().ok_or("schedule cadence is required")?;
+        let time = args.next().ok_or("schedule time is required")?;
+        if args.next().is_some() {
+            return Err("too many schedule arguments".into());
+        }
+        let name = name.to_str().ok_or("profile name must be Unicode")?;
+        let cadence = cadence.to_str().ok_or("cadence must be Unicode")?;
+        let time = time.to_str().ok_or("time must be Unicode")?;
+        profiles::schedule(name, cadence, time)?;
+        if !quiet {
+            show_dialog(
+                "Zero",
+                &format!("Profile {name} scheduled: {cadence} at {time}."),
+            );
+        }
+        return Ok(());
+    }
+    if args.peek().is_some_and(|arg| arg == "--unschedule") {
+        args.next();
+        let name = args.next().ok_or("profile name is required")?;
+        if args.next().is_some() {
+            return Err("too many unschedule arguments".into());
+        }
+        let name = name.to_str().ok_or("profile name must be Unicode")?;
+        profiles::unschedule(name)?;
+        if !quiet {
+            show_dialog("Zero", &format!("Profile {name} is no longer scheduled."));
+        }
+        return Ok(());
+    }
+    if args.peek().is_some_and(|arg| arg == "--profiles") {
+        args.next();
+        if args.next().is_some() {
+            return Err("too many profile-list arguments".into());
+        }
+        if !quiet {
+            let names = profiles::list()?;
+            show_dialog(
+                "Zero",
+                &format!(
+                    "Saved profiles:\n\n{}",
+                    if names.is_empty() {
+                        "(none)".to_owned()
+                    } else {
+                        names.join("\n")
+                    }
+                ),
+            );
+        }
+        return Ok(());
+    }
+    let mut from_profile = false;
+    let mut volume_selection = None;
+    let (sources, receipt_dir) = if args.peek().is_some_and(|arg| arg == "--profile") {
+        args.next();
+        let name = args.next().ok_or("profile name is required")?;
+        if args.next().is_some() {
+            return Err("too many profile-run arguments".into());
+        }
+        let name = name.to_str().ok_or("profile name must be Unicode")?;
+        from_profile = true;
+        profiles::load(name)?
+    } else if args.peek().is_some_and(|arg| arg == "--volume") {
+        args.next();
+        let root = PathBuf::from(args.next().ok_or("volume root is required")?);
+        if args.next().is_some() {
+            return Err("too many volume arguments".into());
+        }
+        let selection = volume::inspect(&root, &env::current_exe()?, &state_directory()?)?;
+        let children = selection.children.clone();
+        volume_selection = Some(selection);
+        (children, None)
+    } else {
+        let receipt_dir = if args.peek().is_some_and(|arg| arg == "--receipts") {
+            args.next();
+            Some(PathBuf::from(
+                args.next().ok_or("receipt directory is required")?,
+            ))
+        } else {
+            None
+        };
+        (args.map(PathBuf::from).collect(), receipt_dir)
+    };
+    recover_pending_jobs(&state_directory()?)?;
+    let sources: Vec<PathBuf> = if from_profile {
+        sources.into_iter().filter(|path| path.exists()).collect()
+    } else {
+        sources
+    };
+    if sources.is_empty() && volume_selection.is_none() {
+        if !quiet {
+            show_dialog(
+                "Zero",
+                "Drag files or folders onto this executable in Windows Explorer.\n\nEach selected file is encrypted on disk with AES-256-GCM, verified, and then its working key is cleared. The file is overwritten and deleted. Nothing is retained after success. There is no confirmation prompt.",
+            );
+        }
+        return Ok(());
+    }
+    if sources.len() > 32 && volume_selection.is_none() {
+        return Err("select at most 32 files or folders per drop".into());
+    }
+    let (files, folders) = collect_selection(&sources)?;
+    if let Some(dir) = &receipt_dir {
+        let absolute = std::path::absolute(dir)?;
+        let receipt_name = absolute.to_string_lossy().to_lowercase();
+        if folders.iter().any(|folder| {
+            receipt_name.starts_with(&format!("{}\\", folder.to_string_lossy().to_lowercase()))
+                || receipt_name == folder.to_string_lossy().to_lowercase()
+        }) {
+            return Err("receipt directory must be outside selected folders".into());
         }
     }
 
-    for (index, source) in sources.iter().enumerate() {
-        if let Err(error) = process_one(source) {
-            return Err(format!(
+    for (index, selected) in files.iter().enumerate() {
+        let original_bytes = process_one_with_identity(&selected.path, selected.identity).map_err(|error| {
+            format!(
                 "{}: {error}\n\n{} earlier file(s) completed. This file may be partly encrypted or overwritten if the error occurred after staging.",
-                source.display(),
-                index
+                selected.path.display(), index
             )
-            .into());
+        })?;
+        if let Some(dir) = &receipt_dir {
+            receipts::write_receipt(&selected.path, original_bytes, dir)?;
         }
     }
-    show_dialog(
-        "Zero",
-        &format!(
-            "Processed {} selected file(s).\n\nNo encrypted files or keys were retained. The selected originals were overwritten and deleted. Backups, snapshots, and old storage blocks may remain.",
-            sources.len()
-        ),
-    );
+    if !from_profile {
+        for folder in folders.iter().rev() {
+            fs::remove_dir(folder)?;
+        }
+    }
+    if !quiet {
+        let volume_note = volume_selection.as_ref().map_or(String::new(), |selection| {
+            format!(
+                "\n\nVolume: {} ({}, {}). Skipped {} root system entries. This was file-level cleanup; free space, prior copies, and device-reserved blocks were not sanitized.",
+                selection.root.display(),
+                selection.kind,
+                selection.filesystem,
+                selection.skipped_system_entries
+            )
+        });
+        show_dialog(
+            "Zero",
+            &format!(
+                "Processed {} selected file(s).\n\nNo encrypted files or keys were retained. The selected originals were overwritten and deleted. Backups, snapshots, and old storage blocks may remain.{}",
+                files.len(),
+                volume_note
+            ),
+        );
+    }
     Ok(())
 }
 
-fn process_one(source: &Path) -> AppResult<()> {
+struct SelectedFile {
+    path: PathBuf,
+    identity: FileIdentity,
+}
+
+fn collect_selection(sources: &[PathBuf]) -> AppResult<(Vec<SelectedFile>, Vec<PathBuf>)> {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x0000_0004;
+    const MAX_FILES: usize = 100_000;
+
+    let mut files = Vec::new();
+    let mut folders = Vec::new();
+    let mut seen = HashSet::new();
+    let state_dir = state_directory()?;
+    fs::create_dir_all(&state_dir)?;
+    let protected = [state_dir, env::current_exe()?]
+        .into_iter()
+        .map(|path| {
+            fs::canonicalize(&path)
+                .or_else(|_| std::path::absolute(&path))
+                .map(|path| path.to_string_lossy().to_lowercase())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut pending: Vec<PathBuf> = sources
+        .iter()
+        .rev()
+        .map(std::path::absolute)
+        .collect::<Result<_, _>>()?;
+    while let Some(path) = pending.pop() {
+        for ancestor in path.ancestors() {
+            let attributes = fs::symlink_metadata(ancestor)?.file_attributes();
+            if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(format!("reparse points are refused: {}", ancestor.display()).into());
+            }
+        }
+        let metadata = fs::symlink_metadata(&path)?;
+        let attributes = metadata.file_attributes();
+        if attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_OFFLINE) != 0 {
+            return Err(format!("unsupported path: {}", path.display()).into());
+        }
+        let canonical = fs::canonicalize(&path)?;
+        let identity = canonical.to_string_lossy().to_lowercase();
+        if protected.iter().any(|protected_path| {
+            identity == *protected_path
+                || (metadata.is_dir()
+                    && protected_path
+                        .starts_with(&format!("{}\\", identity.trim_end_matches('\\'))))
+        }) {
+            return Err(format!(
+                "Zero's executable or state directory is inside the selection: {}",
+                path.display()
+            )
+            .into());
+        }
+        if !seen.insert(identity) {
+            continue;
+        }
+        if metadata.is_dir() {
+            if path.parent().is_none() || attributes & FILE_ATTRIBUTE_SYSTEM != 0 {
+                return Err(format!(
+                    "system and volume-root folders are refused: {}",
+                    path.display()
+                )
+                .into());
+            }
+            folders.push(path.clone());
+            let mut children = fs::read_dir(&path)?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<Result<Vec<_>, _>>()?;
+            children.sort();
+            pending.extend(children.into_iter().rev());
+        } else if metadata.is_file() {
+            let inspected = open_for_destroy(&path)?;
+            let identity = file_identity(&inspected)?;
+            drop(inspected);
+            files.push(SelectedFile { path, identity });
+            if files.len() > MAX_FILES {
+                return Err("selection exceeds 100,000 files".into());
+            }
+        } else {
+            return Err(format!(
+                "only ordinary files and folders are supported: {}",
+                path.display()
+            )
+            .into());
+        }
+    }
+    folders.sort_by_key(|path| path.components().count());
+    Ok((files, folders))
+}
+
+fn process_one_with_identity(source: &Path, expected: FileIdentity) -> AppResult<u64> {
     let mut file = open_for_destroy(source)?;
+    if file_identity(&file)? != expected {
+        return Err(format!("selected file changed: {}", source.display()).into());
+    }
+    let original_bytes = file.metadata()?.len();
     let mut key = Zeroizing::new([0u8; 32]);
     getrandom::fill(&mut *key)?;
     let (mut stage, stage_path) = create_encrypted_stage(source)?;
     encrypt_stream(&mut file, &mut stage, &key)?;
     stage.sync_all()?;
     verify_encrypted_stage(&mut stage, &mut file, &key)?;
+    let journal = PendingJournal::create(source, &file, &stage_path, &stage, &state_directory()?)?;
     replace_source_with_ciphertext(&mut file, &mut stage)?;
     key.zeroize();
     drop(stage);
     if stage_path.try_exists()? {
         return Err("temporary encrypted file was not removed".into());
     }
-    overwrite_and_delete(file, source)
+    overwrite_and_delete(file, source)?;
+    journal.complete()?;
+    Ok(original_bytes)
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct FileIdentity {
+    volume: u32,
+    index: u64,
+    creation_time: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct PendingOperation {
+    version: u8,
+    source: Vec<u16>,
+    source_identity: FileIdentity,
+    stage: Vec<u16>,
+    stage_identity: FileIdentity,
+}
+
+struct PendingJournal {
+    path: PathBuf,
+}
+
+impl PendingJournal {
+    fn create(
+        source: &Path,
+        source_file: &File,
+        stage: &Path,
+        stage_file: &File,
+        state_dir: &Path,
+    ) -> AppResult<Self> {
+        fs::create_dir_all(state_dir)?;
+        let operation = PendingOperation {
+            version: 1,
+            source: source.as_os_str().encode_wide().collect(),
+            source_identity: file_identity(source_file)?,
+            stage: stage.as_os_str().encode_wide().collect(),
+            stage_identity: file_identity(stage_file)?,
+        };
+        let encoded = serde_json::to_vec(&operation)?;
+        for _ in 0..8 {
+            let mut id = [0u8; 16];
+            getrandom::fill(&mut id)?;
+            let name: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
+            let path = state_dir.join(format!("pending-{name}.json"));
+            let opened = OpenOptions::new().write(true).create_new(true).open(&path);
+            match opened {
+                Ok(mut file) => {
+                    file.write_all(&encoded)?;
+                    file.sync_all()?;
+                    return Ok(Self { path });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err("could not choose a unique recovery record name".into())
+    }
+
+    fn complete(self) -> AppResult<()> {
+        fs::remove_file(self.path)?;
+        Ok(())
+    }
+}
+
+fn state_directory() -> AppResult<PathBuf> {
+    let appdata = env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is unavailable")?;
+    Ok(PathBuf::from(appdata).join("Zero"))
+}
+
+fn recover_pending_jobs(state_dir: &Path) -> AppResult<()> {
+    if !state_dir.try_exists()? {
+        return Ok(());
+    }
+    let mut records = fs::read_dir(state_dir)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    records.sort();
+    for record_path in records {
+        if record_path
+            .extension()
+            .is_none_or(|extension| extension != "json")
+            || record_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| !name.starts_with("pending-"))
+        {
+            continue;
+        }
+        let record_file = File::open(&record_path)?;
+        if record_file.metadata()?.len() > 64 * 1024 {
+            return Err(format!("recovery record is too large: {}", record_path.display()).into());
+        }
+        let operation: PendingOperation = serde_json::from_reader(record_file)?;
+        if operation.version != 1 || operation.source.is_empty() || operation.stage.is_empty() {
+            return Err("recovery record has an unsupported format".into());
+        }
+        let source = PathBuf::from(std::ffi::OsString::from_wide(&operation.source));
+        let stage = PathBuf::from(std::ffi::OsString::from_wide(&operation.stage));
+        if source.try_exists()? {
+            let file = open_for_destroy(&source)?;
+            if file_identity(&file)? != operation.source_identity {
+                return Err(format!(
+                    "selected file changed before recovery: {}",
+                    source.display()
+                )
+                .into());
+            }
+            overwrite_and_delete(file, &source)?;
+        }
+        if stage.try_exists()? {
+            let file = open_for_destroy(&stage)?;
+            if file_identity(&file)? != operation.stage_identity {
+                return Err(format!(
+                    "encrypted stage changed before recovery: {}",
+                    stage.display()
+                )
+                .into());
+            }
+            drop(file);
+            fs::remove_file(&stage)?;
+        }
+        fs::remove_file(&record_path)?;
+    }
+    Ok(())
 }
 
 fn create_encrypted_stage(source: &Path) -> AppResult<(File, PathBuf)> {
@@ -160,22 +689,23 @@ fn open_for_destroy(source: &Path) -> AppResult<File> {
     Ok(file)
 }
 
-fn hard_link_count(file: &File) -> AppResult<u32> {
+#[repr(C)]
+struct FileInfo {
+    _attributes: u32,
+    creation_time: [u32; 2],
+    _access_time: [u32; 2],
+    _write_time: [u32; 2],
+    volume_serial: u32,
+    _size_high: u32,
+    _size_low: u32,
+    links: u32,
+    index_high: u32,
+    index_low: u32,
+}
+
+fn file_info(file: &File) -> AppResult<FileInfo> {
     use std::mem::MaybeUninit;
 
-    #[repr(C)]
-    struct FileInfo {
-        _attributes: u32,
-        _creation_time: [u32; 2],
-        _access_time: [u32; 2],
-        _write_time: [u32; 2],
-        _volume_serial: u32,
-        _size_high: u32,
-        _size_low: u32,
-        links: u32,
-        _index_high: u32,
-        _index_low: u32,
-    }
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetFileInformationByHandle(handle: *mut c_void, info: *mut FileInfo) -> i32;
@@ -185,7 +715,20 @@ fn hard_link_count(file: &File) -> AppResult<u32> {
     if ok == 0 {
         return Err(io::Error::last_os_error().into());
     }
-    Ok(unsafe { info.assume_init() }.links)
+    Ok(unsafe { info.assume_init() })
+}
+
+fn hard_link_count(file: &File) -> AppResult<u32> {
+    Ok(file_info(file)?.links)
+}
+
+fn file_identity(file: &File) -> AppResult<FileIdentity> {
+    let info = file_info(file)?;
+    Ok(FileIdentity {
+        volume: info.volume_serial,
+        index: ((info.index_high as u64) << 32) | info.index_low as u64,
+        creation_time: ((info.creation_time[1] as u64) << 32) | info.creation_time[0] as u64,
+    })
 }
 
 fn encrypt_stream<W: Write>(input: &mut File, output: &mut W, key: &[u8; 32]) -> AppResult<()> {
@@ -526,7 +1069,8 @@ mod tests {
         let other = root.join("other.txt");
         fs::write(&selected, vec![0x52; CHUNK_SIZE + 17]).unwrap();
         fs::write(&other, b"keep this").unwrap();
-        process_one(&selected).unwrap();
+        let identity = file_identity(&open_for_destroy(&selected).unwrap()).unwrap();
+        process_one_with_identity(&selected, identity).unwrap();
         assert!(!selected.exists());
         assert_eq!(fs::read(&other).unwrap(), b"keep this");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
@@ -542,6 +1086,68 @@ mod tests {
         fs::hard_link(&selected, &other_link).unwrap();
         assert!(open_for_destroy(&selected).is_err());
         assert_eq!(fs::read(&other_link).unwrap(), b"shared content");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_folder_selection_stays_inside_selected_tree() {
+        let root = test_root("folder");
+        let selected = root.join("selected");
+        let nested = selected.join("nested");
+        let untouched = root.join("untouched.txt");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(selected.join("a.txt"), b"a").unwrap();
+        fs::write(nested.join("b.txt"), b"b").unwrap();
+        fs::write(&untouched, b"keep").unwrap();
+        let (files, folders) = collect_selection(std::slice::from_ref(&selected)).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(folders.len(), 2);
+        for file in files {
+            process_one_with_identity(&file.path, file.identity).unwrap();
+        }
+        for folder in folders.iter().rev() {
+            fs::remove_dir(folder).unwrap();
+        }
+        assert!(!selected.exists());
+        assert_eq!(fs::read(untouched).unwrap(), b"keep");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replacement_after_preflight_is_refused_before_processing() {
+        let root = test_root("replacement");
+        let selected = root.join("selected.txt");
+        let original = root.join("moved-original.txt");
+        fs::write(&selected, b"original selected file").unwrap();
+        let (files, _) = collect_selection(std::slice::from_ref(&selected)).unwrap();
+        fs::rename(&selected, &original).unwrap();
+        fs::write(&selected, b"replacement file").unwrap();
+        assert!(process_one_with_identity(&files[0].path, files[0].identity).is_err());
+        assert_eq!(fs::read(&selected).unwrap(), b"replacement file");
+        assert_eq!(fs::read(&original).unwrap(), b"original selected file");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_finishes_a_selected_file_after_interruption() {
+        let root = test_root("recovery");
+        let state = root.join("state");
+        let source = root.join("selected.bin");
+        let stage_path = root.join("encrypted-stage.tmp");
+        fs::write(&source, b"original plaintext").unwrap();
+        fs::write(&stage_path, b"encrypted stage").unwrap();
+        let mut file = open_for_destroy(&source).unwrap();
+        let stage = open_for_destroy(&stage_path).unwrap();
+        let journal = PendingJournal::create(&source, &file, &stage_path, &stage, &state).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(b"partially changed").unwrap();
+        drop(file);
+        drop(stage);
+        assert!(journal.path.exists());
+        recover_pending_jobs(&state).unwrap();
+        assert!(!source.exists());
+        assert!(!stage_path.exists());
+        assert!(!journal.path.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
