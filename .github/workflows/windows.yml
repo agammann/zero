@@ -22,3 +22,13 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build
         run: cargo build --release --locked
+      - name: Whole-volume command stays disabled
+        shell: pwsh
+        run: |
+          $testRoot = Join-Path $env:RUNNER_TEMP 'zero-volume-guard'
+          New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+          $sentinel = Join-Path $testRoot 'keep.txt'
+          Set-Content -LiteralPath $sentinel -Value 'keep'
+          & .\target\release\zero.exe --quiet --volume $testRoot
+          if ($LASTEXITCODE -ne 1) { throw 'The retired command did not fail.' }
+          if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne 'keep') { throw 'The sentinel changed.' }

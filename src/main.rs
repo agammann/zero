@@ -5,7 +5,6 @@ compile_error!("Zero currently supports Windows only.");
 mod profiles;
 mod receipts;
 mod remote;
-mod volume;
 
 use aes_gcm::{Aes256Gcm, Nonce, aead::AeadInOut, aead::KeyInit};
 use serde::{Deserialize, Serialize};
@@ -275,8 +274,12 @@ fn run() -> AppResult<()> {
         }
         return Ok(());
     }
+    if args.peek().is_some_and(|arg| arg == "--volume") {
+        return Err(
+            "whole-volume selection is not supported; drag specific files or folders".into(),
+        );
+    }
     let mut from_profile = false;
-    let mut volume_selection = None;
     let (sources, receipt_dir) = if args.peek().is_some_and(|arg| arg == "--profile") {
         args.next();
         let name = args.next().ok_or("profile name is required")?;
@@ -286,16 +289,6 @@ fn run() -> AppResult<()> {
         let name = name.to_str().ok_or("profile name must be Unicode")?;
         from_profile = true;
         profiles::load(name)?
-    } else if args.peek().is_some_and(|arg| arg == "--volume") {
-        args.next();
-        let root = PathBuf::from(args.next().ok_or("volume root is required")?);
-        if args.next().is_some() {
-            return Err("too many volume arguments".into());
-        }
-        let selection = volume::inspect(&root, &env::current_exe()?, &state_directory()?)?;
-        let children = selection.children.clone();
-        volume_selection = Some(selection);
-        (children, None)
     } else {
         let receipt_dir = if args.peek().is_some_and(|arg| arg == "--receipts") {
             args.next();
@@ -313,7 +306,7 @@ fn run() -> AppResult<()> {
     } else {
         sources
     };
-    if sources.is_empty() && volume_selection.is_none() {
+    if sources.is_empty() {
         if !quiet {
             show_dialog(
                 "Zero",
@@ -322,7 +315,7 @@ fn run() -> AppResult<()> {
         }
         return Ok(());
     }
-    if sources.len() > 32 && volume_selection.is_none() {
+    if sources.len() > 32 {
         return Err("select at most 32 files or folders per drop".into());
     }
     let (files, folders) = collect_selection(&sources)?;
@@ -354,21 +347,11 @@ fn run() -> AppResult<()> {
         }
     }
     if !quiet {
-        let volume_note = volume_selection.as_ref().map_or(String::new(), |selection| {
-            format!(
-                "\n\nVolume: {} ({}, {}). Skipped {} root system entries. This was file-level cleanup; free space, prior copies, and device-reserved blocks were not sanitized.",
-                selection.root.display(),
-                selection.kind,
-                selection.filesystem,
-                selection.skipped_system_entries
-            )
-        });
         show_dialog(
             "Zero",
             &format!(
-                "Processed {} selected file(s).\n\nNo encrypted files or keys were retained. The selected originals were overwritten and deleted. Backups, snapshots, and old storage blocks may remain.{}",
-                files.len(),
-                volume_note
+                "Processed {} selected file(s).\n\nNo encrypted files or keys were retained. The selected originals were overwritten and deleted. Backups, snapshots, and old storage blocks may remain.",
+                files.len()
             ),
         );
     }
@@ -434,7 +417,7 @@ fn collect_selection(sources: &[PathBuf]) -> AppResult<(Vec<SelectedFile>, Vec<P
             continue;
         }
         if metadata.is_dir() {
-            if path.parent().is_none() || attributes & FILE_ATTRIBUTE_SYSTEM != 0 {
+            if canonical.parent().is_none() || attributes & FILE_ATTRIBUTE_SYSTEM != 0 {
                 return Err(format!(
                     "system and volume-root folders are refused: {}",
                     path.display()
@@ -1126,6 +1109,19 @@ mod tests {
         assert_eq!(fs::read(&selected).unwrap(), b"replacement file");
         assert_eq!(fs::read(&original).unwrap(), b"original selected file");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn canonical_drive_root_alias_has_no_parent() {
+        let root = env::current_exe()
+            .unwrap()
+            .ancestors()
+            .last()
+            .unwrap()
+            .to_path_buf();
+        let alias = root.join(".");
+        let canonical = fs::canonicalize(alias).unwrap();
+        assert!(canonical.parent().is_none());
     }
 
     #[test]

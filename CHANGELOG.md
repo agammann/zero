@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Remove whole-volume selection. The `--volume` command now stops without changing files.
+- Refuse volume-root folder aliases after resolving their canonical path.
+- Keep explicit file and folder selection, saved profiles, scheduling, receipts, and remote profile jobs.
+
 ## 0.3.0
 
 - Add recursive folder drops, saved profiles, and Windows Task Scheduler jobs.

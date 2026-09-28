@@ -1,6 +1,6 @@
 # Zero: storage and key model
 
-This document describes version 0.3.0's implemented file-level sequence. It is not a certification that every historical copy is gone.
+This document describes version 0.3.1's implemented file-level sequence. It is not a certification that every historical copy is gone.
 
 ## Per-file sequence
 
@@ -26,7 +26,7 @@ After success, no encrypted file or per-file AES key is intentionally retained. 
 
 Zero checks bytes returned by Windows for the current logical file and stage. This confirms that the active handle presented ciphertext and later random data at the points checked. It does not prove that the physical media contains no prior plaintext. SSD wear leveling, remapped sectors, copy-on-write filesystems, application temporary files, backups, snapshots, and cloud replicas are outside this path.
 
-The selected original may have existed as plaintext before Zero opened it. Encrypting its current contents is not retroactive encryption of old copies. Folder and `--volume` modes simply choose more files for this same per-file path. They do not issue a device firmware sanitize command or overwrite all free space.
+The selected original may have existed as plaintext before Zero opened it. Encrypting its current contents is not retroactive encryption of old copies. A selected folder chooses its nested ordinary files for the same per-file path. Zero refuses volume roots and does not issue a device firmware sanitize command or overwrite all free space.
 
 Zero does not lock every key schedule or temporary plaintext buffer against paging. `Zeroizing` clears the working key and the cipher library is built to clear state, but the operating system, cryptographic library, and hardware can keep copies beyond the app's control. Key disposal is best effort.
 
@@ -34,5 +34,4 @@ Zero does not lock every key schedule or temporary plaintext buffer against pagi
 
 - [NIST SP 800-88 Rev. 2](https://csrc.nist.gov/pubs/sp/800/88/r2/final) explains media sanitization methods and verification limits.
 - [Windows `FILE_FLAG_DELETE_ON_CLOSE`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew) defines the stage handle's deletion behavior.
-- [Windows `GetDriveTypeW`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getdrivetypew) distinguishes local, remote, removable, and fixed drive types, but not SSD versus HDD.
 - [Windows Data Protection API](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata) protects the optional signing key for the current Windows user.

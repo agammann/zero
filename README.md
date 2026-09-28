@@ -1,6 +1,6 @@
 # Zero
 
-Zero is a free, open-source Windows app for the files and folders you explicitly select. Drag up to 32 files or folders onto `Zero.exe`; it starts immediately without a confirmation prompt. A folder drop includes its nested ordinary files and removes the selected folders when they are empty. Zero does not retain a vault.
+Zero is a free, open-source Windows app for the files and folders you explicitly select. Drag up to 32 files or folders onto `Zero.exe`; it starts immediately without a confirmation prompt. A folder drop includes its nested ordinary files and removes the selected folders when they are empty. Zero does not retain a vault. Volume roots are refused; Zero has no whole-device operation.
 
 For each file, Zero writes an AES-256-GCM encrypted stage on the same volume, authenticates that stage, replaces the selected file's current logical contents with the verified ciphertext, clears its working key, overwrites the file once with random bytes, checks the logical readback, and deletes it. It rejects reparse points, files with other hard links, and unsupported file attributes. The whole selection is inspected before the first file is changed, with a limit of 100,000 files.
 
@@ -40,16 +40,6 @@ Receipts are off by default. To write a signed JSON record for each successfully
 
 The receipt signing key is a separate, persistent Ed25519 key protected for the current Windows user with DPAPI. The per-file AES key is still cleared after use. Transfer and trust the public key independently of the receipt. A valid signature attests that this app signed the listed actions; it cannot prove physical erasure, historical-copy removal, or that the signing computer was uncompromised.
 
-## Explicit volume cleanup
-
-`--volume` accepts one exact local volume root, such as `E:\`. It inspects the root's contents and performs the same file-level process on supported files. Root entries marked as Windows system files are skipped and counted in the result. It leaves the root itself in place. Zero refuses the Windows, executable, and app-state volumes and refuses network and unsupported drive types. An ordinary folder is not accepted as a volume root.
-
-```powershell
-.\Zero.exe --volume "E:\"
-```
-
-This command removes selected files on that volume. It does **not** sanitize unused space, partition metadata, spare cells, remapped blocks, drive firmware storage, or historical copies. Windows may report an external SSD as a fixed drive; the displayed drive type does not identify HDD versus SSD. This path has been tested for rejecting the system volume; a full run on a separate physical volume has not yet been verified.
-
 ## Authenticated remote jobs
 
 Zero can use a shared directory as a job queue. This may be a user-managed sync folder or SMB share; Zero provides no hosted relay. The controller signs a request for a device and one pre-enrolled profile. The target's one-minute Windows task verifies the controller signature and local allowlist, records the exact selected file identities for restart, processes them, and signs a result. A completed job ID is recorded locally so replaying the same request does not process newly added files.
@@ -85,6 +75,6 @@ Install a current Rust toolchain for Windows and run:
 .\build-windows.ps1
 ```
 
-The script tests and builds `Zero.exe`. `Cargo.lock` pins dependencies. The source includes tests for AES-256-GCM staging, ciphertext readback, folder selection, interruption recovery, receipt signatures, remote authorization, and protected-volume refusal. See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled Rust dependencies.
+The script tests and builds `Zero.exe`. `Cargo.lock` pins dependencies. The source includes tests for AES-256-GCM staging, ciphertext readback, folder selection, interruption recovery, receipt signatures, and remote authorization. See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled Rust dependencies.
 
 Zero is available under the [MIT License](LICENSE).
