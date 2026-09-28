@@ -1,6 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #[cfg(not(windows))]
-compile_error!("One-Way Vault currently supports Windows only.");
+compile_error!("Zero currently supports Windows only.");
 
 use aes_gcm::{Aes256Gcm, Nonce, aead::AeadInOut, aead::KeyInit};
 use sha2::{Digest, Sha256};
@@ -13,7 +13,7 @@ use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use zeroize::{Zeroize, Zeroizing};
 
-const MAGIC: &[u8; 8] = b"OWVAULT1";
+const MAGIC: &[u8; 8] = b"ZEROFMT2";
 const CHUNK_SIZE: usize = 1024 * 1024;
 const TAG_SIZE: usize = 16;
 
@@ -21,7 +21,7 @@ type AppResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 fn main() {
     if let Err(error) = run() {
-        show_dialog("One-Way Vault", &format!("Operation stopped:\n\n{error}"));
+        show_dialog("Zero", &format!("Operation stopped:\n\n{error}"));
         std::process::exit(1);
     }
 }
@@ -30,8 +30,8 @@ fn run() -> AppResult<()> {
     let sources: Vec<PathBuf> = env::args_os().skip(1).map(PathBuf::from).collect();
     if sources.is_empty() {
         show_dialog(
-            "One-Way Vault",
-            "Drag up to 32 individual files onto this executable in Windows Explorer.\n\nEach selected file is processed with AES-256-GCM, its working key is cleared, and its original is overwritten and deleted. No encrypted file is saved. There is no confirmation prompt.",
+            "Zero",
+            "Drag up to 32 individual files onto this executable in Windows Explorer.\n\nEach selected file is encrypted on disk with AES-256-GCM, verified, and then its working key is cleared. The file is overwritten and deleted. Nothing is retained after success. There is no confirmation prompt.",
         );
         return Ok(());
     }
@@ -52,7 +52,7 @@ fn run() -> AppResult<()> {
     for (index, source) in sources.iter().enumerate() {
         if let Err(error) = process_one(source) {
             return Err(format!(
-                "{}: {error}\n\n{} earlier file(s) completed. This file may be partly overwritten if the error occurred during cleanup.",
+                "{}: {error}\n\n{} earlier file(s) completed. This file may be partly encrypted or overwritten if the error occurred after staging.",
                 source.display(),
                 index
             )
@@ -60,9 +60,9 @@ fn run() -> AppResult<()> {
         }
     }
     show_dialog(
-        "One-Way Vault",
+        "Zero",
         &format!(
-            "Processed {} selected file(s).\n\nNo encrypted files or keys were saved. The selected originals were overwritten and deleted. Backups, snapshots, and old storage blocks may remain.",
+            "Processed {} selected file(s).\n\nNo encrypted files or keys were retained. The selected originals were overwritten and deleted. Backups, snapshots, and old storage blocks may remain.",
             sources.len()
         ),
     );
@@ -73,10 +73,45 @@ fn process_one(source: &Path) -> AppResult<()> {
     let mut file = open_for_destroy(source)?;
     let mut key = Zeroizing::new([0u8; 32]);
     getrandom::fill(&mut *key)?;
-    let encryption = encrypt_stream(&mut file, &mut io::sink(), &key);
+    let (mut stage, stage_path) = create_encrypted_stage(source)?;
+    encrypt_stream(&mut file, &mut stage, &key)?;
+    stage.sync_all()?;
+    verify_encrypted_stage(&mut stage, &mut file, &key)?;
+    replace_source_with_ciphertext(&mut file, &mut stage)?;
     key.zeroize();
-    encryption?;
+    drop(stage);
+    if stage_path.try_exists()? {
+        return Err("temporary encrypted file was not removed".into());
+    }
     overwrite_and_delete(file, source)
+}
+
+fn create_encrypted_stage(source: &Path) -> AppResult<(File, PathBuf)> {
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const DELETE: u32 = 0x0001_0000;
+    const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+    let parent = source.parent().unwrap_or_else(|| Path::new("."));
+    for _ in 0..8 {
+        let mut id = [0u8; 16];
+        getrandom::fill(&mut id)?;
+        let name: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
+        let path = parent.join(format!(".zero-stage-{name}.tmp"));
+        let opened = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+            .open(&path);
+        match opened {
+            Ok(file) => return Ok((file, path)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err("could not choose a unique temporary file name".into())
 }
 
 fn show_dialog(title: &str, message: &str) {
@@ -223,6 +258,114 @@ fn frame_aad(header: &[u8; 28], index: u32, final_frame: bool) -> [u8; 33] {
     aad
 }
 
+fn verify_encrypted_stage(stage: &mut File, source: &mut File, key: &[u8; 32]) -> AppResult<()> {
+    stage.seek(SeekFrom::Start(0))?;
+    source.seek(SeekFrom::Start(0))?;
+    let mut header = [0u8; 28];
+    stage.read_exact(&mut header)?;
+    if &header[..8] != MAGIC || u32::from_be_bytes(header[24..28].try_into()?) != CHUNK_SIZE as u32
+    {
+        return Err("encrypted file header is invalid".into());
+    }
+    let prefix: [u8; 8] = header[8..16].try_into()?;
+    let original_len = u64::from_be_bytes(header[16..24].try_into()?);
+    if original_len != source.metadata()?.len() {
+        return Err("source size changed during encryption".into());
+    }
+    let chunks = original_len.div_ceil(CHUNK_SIZE as u64);
+    if chunks > u32::MAX as u64 {
+        return Err("source is too large for the encryption format".into());
+    }
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "invalid AES-256 key")?;
+    let mut remaining = original_len;
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(CHUNK_SIZE + TAG_SIZE));
+    let mut expected = Zeroizing::new(vec![0u8; CHUNK_SIZE]);
+    for index in 0..chunks {
+        let length = remaining.min(CHUNK_SIZE as u64) as usize;
+        let frame_len = u32::from_be_bytes(read_four(stage)?) as usize;
+        if frame_len != length + TAG_SIZE {
+            return Err("encrypted file frame length is invalid".into());
+        }
+        plaintext.resize(frame_len, 0);
+        stage.read_exact(&mut plaintext)?;
+        let nonce: Nonce<<Aes256Gcm as aes_gcm::AeadCore>::NonceSize> =
+            nonce_for(&prefix, index as u32).into();
+        cipher
+            .decrypt_in_place(
+                &nonce,
+                &frame_aad(&header, index as u32, false),
+                &mut *plaintext,
+            )
+            .map_err(|_| "encrypted file authentication failed")?;
+        source.read_exact(&mut expected[..length])?;
+        if *plaintext != expected[..length] {
+            return Err("encrypted file does not match the selected original".into());
+        }
+        plaintext.as_mut_slice().zeroize();
+        plaintext.clear();
+        expected[..length].zeroize();
+        remaining -= length as u64;
+    }
+    let final_len = u32::from_be_bytes(read_four(stage)?) as usize;
+    if final_len != TAG_SIZE {
+        return Err("encrypted file final frame is invalid".into());
+    }
+    let mut final_frame = Zeroizing::new(vec![0u8; TAG_SIZE]);
+    stage.read_exact(&mut final_frame)?;
+    let final_nonce: Nonce<<Aes256Gcm as aes_gcm::AeadCore>::NonceSize> =
+        nonce_for(&prefix, chunks as u32).into();
+    cipher
+        .decrypt_in_place(
+            &final_nonce,
+            &frame_aad(&header, chunks as u32, true),
+            &mut *final_frame,
+        )
+        .map_err(|_| "encrypted file final authentication failed")?;
+    let mut extra = [0u8; 1];
+    if stage.read(&mut extra)? != 0 || source.read(&mut extra)? != 0 {
+        return Err("file changed during encrypted verification".into());
+    }
+    Ok(())
+}
+
+fn read_four(file: &mut File) -> AppResult<[u8; 4]> {
+    let mut bytes = [0u8; 4];
+    file.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn replace_source_with_ciphertext(source: &mut File, stage: &mut File) -> AppResult<()> {
+    stage.seek(SeekFrom::Start(0))?;
+    source.seek(SeekFrom::Start(0))?;
+    let mut buffer = Zeroizing::new(vec![0u8; CHUNK_SIZE]);
+    let mut staged_hash = Sha256::new();
+    let mut copied = 0u64;
+    loop {
+        let count = stage.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        staged_hash.update(&buffer[..count]);
+        source.write_all(&buffer[..count])?;
+        copied += count as u64;
+    }
+    source.set_len(copied)?;
+    source.sync_all()?;
+    source.seek(SeekFrom::Start(0))?;
+    let mut readback_hash = Sha256::new();
+    loop {
+        let count = source.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        readback_hash.update(&buffer[..count]);
+    }
+    if source.metadata()?.len() != copied || staged_hash.finalize() != readback_hash.finalize() {
+        return Err("encrypted readback did not match the on-disk stage".into());
+    }
+    Ok(())
+}
+
 fn overwrite_and_delete(mut file: File, source: &Path) -> AppResult<()> {
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -283,7 +426,7 @@ mod tests {
         let mut id = [0u8; 8];
         getrandom::fill(&mut id).unwrap();
         let name: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
-        let root = env::temp_dir().join(format!("oneway-vault-{label}-{name}"));
+        let root = env::temp_dir().join(format!("zero-{label}-{name}"));
         fs::create_dir_all(&root).unwrap();
         root
     }
@@ -317,7 +460,67 @@ mod tests {
     }
 
     #[test]
-    fn selected_file_is_removed_without_creating_a_vault() {
+    fn selected_file_contains_verified_ciphertext_before_key_disposal() {
+        let root = test_root("stored-ciphertext");
+        let source = root.join("selected.bin");
+        let original = vec![0x6d; CHUNK_SIZE + 23];
+        fs::write(&source, &original).unwrap();
+        let mut file = open_for_destroy(&source).unwrap();
+        let mut key = Zeroizing::new([4u8; 32]);
+        let (mut stage, stage_path) = create_encrypted_stage(&source).unwrap();
+        encrypt_stream(&mut file, &mut stage, &key).unwrap();
+        stage.sync_all().unwrap();
+        assert!(stage_path.exists());
+        stage.seek(SeekFrom::Start(0)).unwrap();
+        let mut staged = Vec::new();
+        stage.read_to_end(&mut staged).unwrap();
+        assert!(staged.starts_with(MAGIC));
+        assert_eq!(decrypt_for_test(&staged, &key), original);
+        assert!(!staged.windows(32).any(|window| window == [0x6d; 32]));
+        verify_encrypted_stage(&mut stage, &mut file, &key).unwrap();
+        replace_source_with_ciphertext(&mut file, &mut stage).unwrap();
+        let mut stored = Vec::new();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.read_to_end(&mut stored).unwrap();
+        assert!(stored.starts_with(MAGIC));
+        assert_eq!(decrypt_for_test(&stored, &key), original);
+        key.zeroize();
+        drop(stage);
+        assert!(!stage_path.exists());
+        overwrite_and_delete(file, &source).unwrap();
+        assert!(!source.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tampered_stage_is_refused_before_original_is_modified() {
+        let root = test_root("tamper");
+        let source = root.join("selected.bin");
+        let original = vec![0x35; 100];
+        fs::write(&source, &original).unwrap();
+        let mut file = open_for_destroy(&source).unwrap();
+        let key = [0x44; 32];
+        let (mut stage, stage_path) = create_encrypted_stage(&source).unwrap();
+        encrypt_stream(&mut file, &mut stage, &key).unwrap();
+        stage.seek(SeekFrom::Start(32)).unwrap();
+        let mut byte = [0u8; 1];
+        stage.read_exact(&mut byte).unwrap();
+        stage.seek(SeekFrom::Start(32)).unwrap();
+        stage.write_all(&[byte[0] ^ 1]).unwrap();
+        stage.sync_all().unwrap();
+        assert!(verify_encrypted_stage(&mut stage, &mut file, &key).is_err());
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut after = Vec::new();
+        file.read_to_end(&mut after).unwrap();
+        assert_eq!(after, original);
+        drop(stage);
+        assert!(!stage_path.exists());
+        drop(file);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selected_file_is_removed_without_retained_files() {
         let root = test_root("destroy");
         let selected = root.join("selected.txt");
         let other = root.join("other.txt");

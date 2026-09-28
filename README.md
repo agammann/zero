@@ -1,33 +1,33 @@
-# One-Way Vault
+# Zero
 
-One-Way Vault is a free, local Windows app for explicitly selected files. It runs AES-256-GCM with a fresh random 256-bit key for each file, discards the ciphertext without saving it, clears its working key buffer, then overwrites and deletes the selected original. It creates no vault file and no key file.
+Zero is a free, local Windows app for removing files you explicitly select. Drag up to 32 individual files onto `Zero.exe`. It runs immediately without a confirmation prompt. It does not scan folders, contact a server, or retain a vault.
 
-## Use it
+For each file, Zero writes an AES-256-GCM encrypted stage in the same directory. It flushes that stage and authenticates it against the selected original. It then replaces the original file's current logical contents with the verified ciphertext, flushes and checks the readback, clears its working key, overwrites the encrypted file once with random bytes, and deletes it. The stage is opened with Windows delete-on-close and is removed when its handle closes. No encrypted file or key is retained after a successful run.
 
-Place `Destroy selected files.exe` in a writable folder. In Windows Explorer, drag up to 32 **individual files** onto its icon. The app starts immediately, with no confirmation prompt, and shows a completion or error dialog. Double-clicking the executable shows brief instructions.
+**This is destructive and has no recovery command.** A batch stops at the first error; files already processed stay processed. If an error or interruption occurs while replacing or overwriting a file, it may be partly modified. Try it on disposable files before using it on anything important.
 
-The app does not scan folders or process unselected files. It refuses linked files and files with another hard link so that an unselected path cannot be changed through the same underlying file. It has no network code; if you select a file in a synced folder or network share, copies elsewhere may remain.
+## What the key can protect
 
-**There is no recovery command.** A batch stops at the first error; earlier files stay processed. If an error occurs during overwrite or deletion, the current original may be partly overwritten.
+The new stage and the selected file's *current logical contents* are ciphertext before Zero clears the key. This is a material change from version 0.1.0, which discarded the ciphertext before it reached storage.
 
-## What cleanup can and cannot prove
+If the file was stored as plaintext before you selected it, an older plaintext copy may still exist in a backup, snapshot, cloud sync service, temporary file, filesystem journal, remapped block, or SSD cell. Encrypting the current file cannot retroactively encrypt those copies. A successful readback only checks bytes returned by Windows through the active file handle. Zero does not claim certified media sanitization or guaranteed erasure of every copy.
 
-After AES-256-GCM runs, the app overwrites the selected file once with random data, flushes it, checks the logical readback, and asks Windows to delete that same open file handle. No encrypted output is retained. This is **best-effort file-level cleanup**, not certified media sanitization.
+Read [the storage and key model](STORAGE_AND_KEY_MODEL.md) for the exact sequence, failure behavior, and limits.
 
-It cannot reach backups, snapshots, cloud copies, temporary files, previous filesystem blocks, or SSD cells that the controller no longer exposes. Logical readback proves only what Windows currently returns for that file. Rust, its cryptography library, and Windows cannot guarantee that every possible in-memory copy of the key was cleared. The process exits when the selected files finish.
+## Supported files
 
-If complete removal of every plaintext copy matters, assess the storage system and its backups separately. A success dialog does not prove that every copy is gone.
+Zero accepts individual ordinary files. It refuses directories, symlinks and other reparse points, files with another hard link, and compressed, sparse, offline, or EFS files. Select at most 32 files in one drop. Use on local Windows storage; network and synced locations may retain other copies.
 
 ## Build and test
 
-Install a current Rust toolchain for Windows and run:
+Install a current Rust toolchain for Windows, then run:
 
 ```powershell
 .\build-windows.ps1
 ```
 
-The script runs the Rust tests and builds `Destroy selected files.exe` beside itself. `Cargo.lock` pins dependency versions. The encryption test captures a ciphertext stream using a test-only key and verifies that AES-256-GCM decrypts it correctly. The app itself sends that stream to a sink and saves no ciphertext.
+The script runs the tests and builds `Zero.exe` beside the script. `Cargo.lock` pins dependency versions. The tests check AES-256-GCM round trips, on-disk ciphertext before key disposal, automatic stage cleanup, selected-file removal, and hard-link refusal. This release has not had an independent security audit or forensic recovery assessment. The Windows executable is unsigned.
 
 ## License
 
-One-Way Vault is available under the [MIT License](LICENSE). Third-party Rust crates retain their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md).
+Zero is available under the [MIT License](LICENSE). Third-party Rust crates retain their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md).
