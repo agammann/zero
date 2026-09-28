@@ -6,6 +6,7 @@ mod filters;
 mod profiles;
 mod receipts;
 mod remote;
+mod storage;
 
 use aes_gcm::{Aes256Gcm, Nonce, aead::AeadInOut, aead::KeyInit};
 use filters::FileFilters;
@@ -21,6 +22,7 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use storage::{StorageAssessment, StorageSummary};
 use zeroize::{Zeroize, Zeroizing};
 
 const MAGIC: &[u8; 8] = b"ZEROFMT2";
@@ -71,8 +73,14 @@ fn run() -> AppResult<()> {
             show_dialog(
                 "Zero",
                 &format!(
-                    "Receipt signature is valid.\n\nSelected path: {}\nOriginal bytes: {}\nCompleted at Unix time: {}\n\nThis verifies the record's signature, not physical media erasure.",
-                    body.selected_path, body.original_bytes, body.completed_unix_seconds
+                    "Receipt signature is valid.\n\nSelected path: {}\nOriginal bytes: {}\nCompleted at Unix time: {}\nStorage context: {}\n\nThis verifies the record's signature, not physical media erasure or historical-copy removal.",
+                    body.selected_path,
+                    body.original_bytes,
+                    body.completed_unix_seconds,
+                    body.storage
+                        .as_ref()
+                        .map(StorageAssessment::describe)
+                        .unwrap_or_else(|| "unavailable in this older receipt".to_owned())
                 ),
             );
         }
@@ -185,14 +193,20 @@ fn run() -> AppResult<()> {
             show_dialog(
                 "Zero",
                 &format!(
-                    "Authenticated result for {}.\n\nJob ID: {}\nProfile: {}\nFiles completed: {}\nFiles missing on retry: {}\nFiles skipped by filters: {}\nCompleted at Unix time: {}\n\nThis verifies the signed app result, not physical media erasure.",
+                    "Authenticated result for {}.\n\nJob ID: {}\nProfile: {}\nFiles completed: {}\nFiles missing on retry: {}\nFiles skipped by filters: {}\nCompleted at Unix time: {}\n\n{}\n\nThis verifies the signed app result, not physical media erasure or historical-copy removal.",
                     body.device_id,
                     body.nonce,
                     body.profile,
                     body.files_completed,
                     body.files_missing,
                     body.files_skipped_filter,
-                    body.completed_unix_seconds
+                    body.completed_unix_seconds,
+                    body.storage
+                        .as_ref()
+                        .map(StorageSummary::describe)
+                        .unwrap_or_else(
+                            || "Storage context unavailable in this older result.".to_owned()
+                        )
                 ),
             );
         }
@@ -274,6 +288,10 @@ fn run() -> AppResult<()> {
             .filter(|path| path.exists())
             .collect();
         let (files, _, skipped) = collect_selection(&sources, Some(&profile.filters), true)?;
+        let mut storage = StorageSummary::default();
+        for selected in &files {
+            storage.add(&selected.storage);
+        }
         let mut listed = files
             .iter()
             .take(15)
@@ -292,14 +310,15 @@ fn run() -> AppResult<()> {
         show_dialog(
             "Zero profile preview",
             &format!(
-                "Profile: {name}\nMatching files: {}\nSkipped by filters: {skipped}\nMissing selected paths: {}\n\n{}\n\nPreview only. No file was encrypted or deleted.",
+                "Profile: {name}\nMatching files: {}\nSkipped by filters: {skipped}\nMissing selected paths: {}\n\n{}\n\n{}\n\nPreview only. No file was encrypted or deleted. Historical copies and physical blocks were not assessed.",
                 files.len(),
                 source_count - sources.len(),
                 if listed.is_empty() {
                     "(no matching files)".to_owned()
                 } else {
                     listed.join("\n")
-                }
+                },
+                storage.describe()
             ),
         );
         return Ok(());
@@ -425,6 +444,7 @@ fn run() -> AppResult<()> {
 
     let mut completed = 0;
     let mut skipped_after_inspection = 0;
+    let mut storage = StorageSummary::default();
     for selected in &files {
         let result = process_one_with_filter(
             &selected.path,
@@ -437,10 +457,16 @@ fn run() -> AppResult<()> {
                 selected.path.display(), completed
             )
         })?;
-        if let Some(original_bytes) = result {
+        if let Some(processed) = result {
             if let Some(dir) = &receipt_dir {
-                receipts::write_receipt(&selected.path, original_bytes, dir)?;
+                receipts::write_receipt(
+                    &selected.path,
+                    processed.original_bytes,
+                    &processed.storage,
+                    dir,
+                )?;
             }
+            storage.add(&processed.storage);
             completed += 1;
         } else {
             skipped_after_inspection += 1;
@@ -463,7 +489,8 @@ fn run() -> AppResult<()> {
         show_dialog(
             "Zero",
             &format!(
-                "Processed {completed} selected file(s).\n\nNo encrypted files or keys were retained. The selected originals were overwritten and deleted. Backups, snapshots, and old storage blocks may remain.{filter_note}"
+                "Processed {completed} selected file(s).\n\n{}\n\nNo encrypted files or keys were retained. The selected originals were overwritten and deleted. Logical readback was checked, but historical copies and physical blocks were not verified. Backups and snapshots may remain.{filter_note}",
+                storage.describe()
             ),
         );
     }
@@ -473,6 +500,12 @@ fn run() -> AppResult<()> {
 struct SelectedFile {
     path: PathBuf,
     identity: FileIdentity,
+    storage: StorageAssessment,
+}
+
+struct ProcessedFile {
+    original_bytes: u64,
+    storage: StorageAssessment,
 }
 
 fn collect_selection(
@@ -568,8 +601,13 @@ fn collect_selection(
                 open_for_destroy(&path)?
             };
             let identity = file_identity(&inspected)?;
+            let storage = storage::assess(&path, &inspected);
             drop(inspected);
-            files.push(SelectedFile { path, identity });
+            files.push(SelectedFile {
+                path,
+                identity,
+                storage,
+            });
         } else {
             return Err(format!(
                 "only ordinary files and folders are supported: {}",
@@ -584,18 +622,16 @@ fn collect_selection(
 
 #[cfg(test)]
 fn process_one_with_identity(source: &Path, expected: FileIdentity) -> AppResult<u64> {
-    process_one_with_filter(source, expected, None)?.ok_or_else(|| {
-        "an unfiltered selected file was skipped unexpectedly"
-            .to_owned()
-            .into()
-    })
+    Ok(process_one_with_filter(source, expected, None)?
+        .ok_or("an unfiltered selected file was skipped unexpectedly")?
+        .original_bytes)
 }
 
 fn process_one_with_filter(
     source: &Path,
     expected: FileIdentity,
     filters: Option<&FileFilters>,
-) -> AppResult<Option<u64>> {
+) -> AppResult<Option<ProcessedFile>> {
     let mut file = open_for_destroy(source)?;
     if file_identity(&file)? != expected {
         return Err(format!("selected file changed: {}", source.display()).into());
@@ -605,6 +641,7 @@ fn process_one_with_filter(
     {
         return Ok(None);
     }
+    let storage = storage::assess(source, &file);
     let original_bytes = file.metadata()?.len();
     let mut key = Zeroizing::new([0u8; 32]);
     getrandom::fill(&mut *key)?;
@@ -621,7 +658,10 @@ fn process_one_with_filter(
     }
     overwrite_and_delete(file, source)?;
     journal.complete()?;
-    Ok(Some(original_bytes))
+    Ok(Some(ProcessedFile {
+        original_bytes,
+        storage,
+    }))
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

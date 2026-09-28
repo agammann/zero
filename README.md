@@ -6,6 +6,12 @@ For each file, Zero writes an AES-256-GCM encrypted stage on the same volume, au
 
 **Zero is destructive.** A processed file cannot be restored through Zero. If a batch fails, earlier files stay processed. Backups, snapshots, cloud copies, old blocks, and device-reserved storage may still hold data. Read [the storage and key model](STORAGE_AND_KEY_MODEL.md) before using Zero for sensitive files. Zero has no independent security audit or forensic certification; the Windows executable is unsigned.
 
+## Storage context
+
+During inspection, Zero makes read-only Windows queries for each selected file's drive category, file-system name, and whether the file system reports shared-block support. The profile preview shows a summary before any file is processed; the completion dialog summarizes processed files. New optional signed receipts record the observed context for each processed file, and signed remote results include aggregate counts. Ordinary local drops write no persistent assessment by default.
+
+"Fixed" is a Windows drive category; it does not tell Zero whether the underlying media is an HDD, SSD, or virtual device. A file system reporting shared-block support does not prove that a particular file's blocks are shared. A query failure is shown as unknown. These observations do not detect old blocks, snapshots, backups, cloud replicas, or device-reserved storage, and they do not establish physical-media erasure. Zero does not open a physical drive or issue a device sanitization command. The actual selected-file cleanup sequence is the same on all reported storage categories.
+
 ## Quick use
 
 1. Download `Zero.exe` from a release, or [build it](#build-and-test).
@@ -49,7 +55,7 @@ Receipts are off by default. To write a signed JSON record for each successfully
 .\Zero.exe --verify-receipt "D:\Zero Receipts\zero-REPLACE.json" "D:\Zero Receipts\trusted-public-key.hex"
 ```
 
-The receipt signing key is a separate, persistent Ed25519 key protected for the current Windows user with DPAPI. The per-file AES key is still cleared after use. Transfer and trust the public key independently of the receipt. A valid signature attests that this app signed the listed actions; it cannot prove physical erasure, historical-copy removal, or that the signing computer was uncompromised.
+The receipt signing key is a separate, persistent Ed25519 key protected for the current Windows user with DPAPI. The per-file AES key is still cleared after use. Transfer and trust the public key independently of the receipt. New receipts include the observed storage context. A valid signature attests that this app signed the listed actions and observations; it cannot prove physical erasure, historical-copy removal, or that the signing computer was uncompromised.
 
 ## Authenticated remote jobs
 
@@ -76,7 +82,7 @@ Back on the controller, trust the target public key through a separate channel, 
 .\Zero.exe --verify-result "D:\Shared Zero Queue\LaptopA\results\result-JOBID.json" "D:\target-public.hex"
 ```
 
-Run `--agent` manually to poll once, or `--remove-agent` on the target to remove its scheduled poller and enrollment. The queue must reach the target for delivery. Anyone who can control the queue can delay or delete jobs and results, but cannot authorize a different profile without the enrolled controller signing key. The target profile and its files are controlled by the target Windows user. A signed result reports the app's actions, files missing on retry, and files skipped because they no longer match filters; it is not a physical erasure certificate. See [remote job design](REMOTE_JOBS.md).
+Run `--agent` manually to poll once, or `--remove-agent` on the target to remove its scheduled poller and enrollment. The queue must reach the target for delivery. Anyone who can control the queue can delay or delete jobs and results, but cannot authorize a different profile without the enrolled controller signing key. The target profile and its files are controlled by the target Windows user. A signed result reports the app's actions, files missing on retry, files skipped because they no longer match filters, and observed storage context for files completed during that attempt; it is not a physical erasure certificate. See [remote job design](REMOTE_JOBS.md).
 
 ## Build and test
 
@@ -86,6 +92,6 @@ Install a current Rust toolchain for Windows and run:
 .\build-windows.ps1
 ```
 
-The script tests and builds `Zero.exe`. `Cargo.lock` pins dependencies. The source includes tests for AES-256-GCM staging, ciphertext readback, folder selection, profile filters, interruption recovery, receipt signatures, and remote authorization. See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled Rust dependencies.
+The script tests and builds `Zero.exe`. `Cargo.lock` pins dependencies. The source includes tests for AES-256-GCM staging, ciphertext readback, folder selection, profile filters, storage-context reporting, interruption recovery, receipt signatures, and remote authorization. See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled Rust dependencies.
 
 Zero is available under the [MIT License](LICENSE).

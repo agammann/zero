@@ -1,3 +1,4 @@
+use crate::storage::StorageAssessment;
 use crate::{AppResult, state_directory};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -156,6 +157,8 @@ pub struct ReceiptBody {
     pub original_bytes: u64,
     pub method: String,
     pub verification: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageAssessment>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -168,6 +171,7 @@ struct SignedReceipt {
 pub fn write_receipt(
     selected_path: &Path,
     original_bytes: u64,
+    storage: &StorageAssessment,
     output: &Path,
 ) -> AppResult<PathBuf> {
     fs::create_dir_all(output)?;
@@ -175,13 +179,14 @@ pub fn write_receipt(
     let key = signing_key(&state_dir)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let body = ReceiptBody {
-        format_version: 1,
+        format_version: 2,
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
         completed_unix_seconds: now,
         selected_path: selected_path.to_string_lossy().into_owned(),
         original_bytes,
         method: "AES-256-GCM stage; encrypted logical readback; key clearing; one random overwrite; Windows deletion".to_owned(),
         verification: "authenticated stage, ciphertext readback, overwrite readback, selected path absent".to_owned(),
+        storage: Some(storage.clone()),
     };
     let signature = key.sign(&serde_json::to_vec(&body)?);
     let record = SignedReceipt {
@@ -208,7 +213,11 @@ pub fn verify_receipt(path: &Path, trusted_public_key: &str) -> AppResult<Receip
         return Err("receipt is too large".into());
     }
     let record: SignedReceipt = serde_json::from_reader(file)?;
-    if record.body.format_version != 1 || record.public_key != trusted_public_key.trim() {
+    if !(1..=2).contains(&record.body.format_version)
+        || (record.body.format_version == 1 && record.body.storage.is_some())
+        || (record.body.format_version == 2 && record.body.storage.is_none())
+        || record.public_key != trusted_public_key.trim()
+    {
         return Err("receipt format or trusted public key does not match".into());
     }
     let public = VerifyingKey::from_bytes(&unhex::<32>(&record.public_key)?)?;
@@ -231,7 +240,17 @@ mod tests {
         let mut id = [0u8; 8];
         getrandom::fill(&mut id).unwrap();
         let output = std::env::temp_dir().join(format!("zero-receipts-{}", hex(&id)));
-        let receipt = write_receipt(Path::new("test-file.txt"), 17, &output).unwrap();
+        let receipt = write_receipt(
+            Path::new("test-file.txt"),
+            17,
+            &StorageAssessment {
+                kind: crate::storage::StorageKind::Unknown,
+                file_system: None,
+                shared_block_capable: None,
+            },
+            &output,
+        )
+        .unwrap();
         let trusted = fs::read_to_string(state.join("receipt-public-key.hex")).unwrap();
         assert_eq!(
             verify_receipt(&receipt, &trusted).unwrap().original_bytes,
@@ -241,5 +260,26 @@ mod tests {
         fs::write(&receipt, original.replace("17", "18")).unwrap();
         assert!(verify_receipt(&receipt, &trusted).is_err());
         fs::remove_dir_all(output).unwrap();
+    }
+
+    #[test]
+    fn old_signed_receipts_still_verify() {
+        let old_body = r#"{"format_version":1,"app_version":"0.4.0","completed_unix_seconds":42,"selected_path":"example.txt","original_bytes":17,"method":"old","verification":"old"}"#;
+        let body: ReceiptBody = serde_json::from_str(old_body).unwrap();
+        assert!(body.storage.is_none());
+        assert_eq!(serde_json::to_string(&body).unwrap(), old_body);
+        let key = SigningKey::from_bytes(&[31u8; 32]);
+        let record = SignedReceipt {
+            body,
+            public_key: hex(&key.verifying_key().to_bytes()),
+            signature: hex(&key.sign(old_body.as_bytes()).to_bytes()),
+        };
+        let mut random = [0u8; 8];
+        getrandom::fill(&mut random).unwrap();
+        let path = std::env::temp_dir().join(format!("zero-old-receipt-{}.json", hex(&random)));
+        fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let result = verify_receipt(&path, &record.public_key).unwrap();
+        assert_eq!(result.original_bytes, 17);
+        fs::remove_file(path).unwrap();
     }
 }

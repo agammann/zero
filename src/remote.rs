@@ -1,6 +1,7 @@
 use crate::filters::FileFilters;
 use crate::profiles;
 use crate::receipts::{hex, signing_key, unhex, write_receipt};
+use crate::storage::StorageSummary;
 use crate::{AppResult, FileIdentity, collect_selection, process_one_with_filter, state_directory};
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -68,6 +69,8 @@ pub struct ResultBody {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub files_skipped_filter: usize,
     pub completed_unix_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageSummary>,
 }
 
 fn is_zero(value: &usize) -> bool {
@@ -322,7 +325,7 @@ fn snapshot(command: &CommandBody, queue: &Path) -> AppResult<Snapshot> {
     })
 }
 
-fn process_snapshot(snapshot: &Snapshot) -> AppResult<(usize, usize, usize)> {
+fn process_snapshot(snapshot: &Snapshot) -> AppResult<(usize, usize, usize, StorageSummary)> {
     if !(1..=2).contains(&snapshot.version)
         || (snapshot.version == 1 && snapshot.filters != FileFilters::default())
         || snapshot.files.len() > 100_000
@@ -333,6 +336,7 @@ fn process_snapshot(snapshot: &Snapshot) -> AppResult<(usize, usize, usize)> {
     let mut completed = 0;
     let mut missing = 0;
     let mut skipped_filter = 0;
+    let mut storage = StorageSummary::default();
     for selected in &snapshot.files {
         let path = PathBuf::from(OsString::from_wide(&selected.path));
         if !path.try_exists()? {
@@ -340,16 +344,22 @@ fn process_snapshot(snapshot: &Snapshot) -> AppResult<(usize, usize, usize)> {
             continue;
         }
         let bytes = process_one_with_filter(&path, selected.identity, Some(&snapshot.filters))?;
-        if let Some(bytes) = bytes {
+        if let Some(processed) = bytes {
             if let Some(directory) = &snapshot.receipt_directory {
-                write_receipt(&path, bytes, &PathBuf::from(OsString::from_wide(directory)))?;
+                write_receipt(
+                    &path,
+                    processed.original_bytes,
+                    &processed.storage,
+                    &PathBuf::from(OsString::from_wide(directory)),
+                )?;
             }
+            storage.add(&processed.storage);
             completed += 1;
         } else {
             skipped_filter += 1;
         }
     }
-    Ok((completed, missing, skipped_filter))
+    Ok((completed, missing, skipped_filter, storage))
 }
 
 fn result_for(
@@ -357,10 +367,11 @@ fn result_for(
     completed: usize,
     missing: usize,
     skipped_filter: usize,
+    storage: StorageSummary,
 ) -> AppResult<SignedResult> {
     let key = signing_key(&state_directory()?)?;
     let body = ResultBody {
-        version: 1,
+        version: 2,
         device_id: snapshot.command.device_id.clone(),
         profile: snapshot.command.profile.clone(),
         nonce: snapshot.command.nonce.clone(),
@@ -368,6 +379,7 @@ fn result_for(
         files_missing: missing,
         files_skipped_filter: skipped_filter,
         completed_unix_seconds: now()?,
+        storage: Some(storage),
     };
     let signature = key.sign(&signing_bytes(RESULT_DOMAIN, &body)?);
     Ok(SignedResult {
@@ -378,7 +390,11 @@ fn result_for(
 }
 
 fn verify_signed_result(result: &SignedResult, trusted_key: &str) -> AppResult<()> {
-    if result.body.version != 1 || result.public_key != trusted_key.trim() {
+    if !(1..=2).contains(&result.body.version)
+        || (result.body.version == 1 && result.body.storage.is_some())
+        || (result.body.version == 2 && result.body.storage.is_none())
+        || result.public_key != trusted_key.trim()
+    {
         return Err("remote result is not signed by the trusted device key".into());
     }
     let public = VerifyingKey::from_bytes(&unhex::<32>(&result.public_key)?)?;
@@ -452,8 +468,8 @@ pub fn poll_once() -> AppResult<usize> {
             if captured.command != command.body {
                 return Err("remote recovery snapshot does not match the signed command".into());
             }
-            let (completed, missing, skipped_filter) = process_snapshot(&captured)?;
-            let result = result_for(&captured, completed, missing, skipped_filter)?;
+            let (completed, missing, skipped_filter, storage) = process_snapshot(&captured)?;
+            let result = result_for(&captured, completed, missing, skipped_filter, storage)?;
             write_new(&done, &result)?;
             fs::remove_file(working)?;
             result
@@ -532,5 +548,34 @@ mod tests {
         };
         assert_eq!(result.body.files_skipped_filter, 0);
         verify_signed_result(&result, &result.public_key).unwrap();
+    }
+
+    #[test]
+    fn storage_summary_is_covered_by_remote_result_signature() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[29u8; 32]);
+        let summary = StorageSummary {
+            fixed: 1,
+            ..StorageSummary::default()
+        };
+        let body = ResultBody {
+            version: 2,
+            device_id: "target".to_owned(),
+            profile: "clean".to_owned(),
+            nonce: "job".to_owned(),
+            files_completed: 1,
+            files_missing: 0,
+            files_skipped_filter: 0,
+            completed_unix_seconds: 42,
+            storage: Some(summary),
+        };
+        let signature = key.sign(&signing_bytes(RESULT_DOMAIN, &body).unwrap());
+        let mut result = SignedResult {
+            body,
+            public_key: hex(&key.verifying_key().to_bytes()),
+            signature: hex(&signature.to_bytes()),
+        };
+        verify_signed_result(&result, &result.public_key).unwrap();
+        result.body.storage.as_mut().unwrap().fixed = 2;
+        assert!(verify_signed_result(&result, &result.public_key).is_err());
     }
 }

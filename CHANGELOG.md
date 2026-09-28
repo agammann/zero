@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0
+
+- Add read-only storage-context assessment for each explicitly selected file. Preview and local completion dialogs report the observed drive category, file system, and shared-block capability.
+- Include the storage assessment in new signed receipts and aggregate storage context in new signed remote results. Verification of earlier receipts and results remains supported.
+- Keep file and folder scope. Zero does not query physical drive type, issue device sanitization commands, wipe free space, or remove backups and snapshots.
+
 ## 0.4.0
 
 - Add optional extension, modified-age, and filename-exclusion filters to saved profiles. Existing profiles remain unfiltered.
