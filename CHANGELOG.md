@@ -2,7 +2,7 @@
 
 ## 0.3.1
 
-- Remove whole-volume selection. The `--volume` command now stops without changing files.
+- Remove whole-volume selection. The `--volume` command now stops without processing selected files.
 - Refuse volume-root folder aliases after resolving their canonical path.
 - Keep explicit file and folder selection, saved profiles, scheduling, receipts, and remote profile jobs.
 
