@@ -1,6 +1,10 @@
 # Zero
 
-Zero is a free, open-source Windows app for the files and folders you explicitly select. Drag up to 32 files or folders onto `Zero.exe`; it starts immediately without a confirmation prompt. A folder drop includes its nested ordinary files and removes the selected folders when they are empty. Zero does not retain a vault. Volume roots are refused; Zero has no whole-device operation.
+Zero is a free, open-source Windows app that processes and removes the files and folders you explicitly select. It works locally without an account, subscription, or API key.
+
+[Download Zero for Windows](https://github.com/agammann/zero/releases/latest) · [Read the storage model](STORAGE_AND_KEY_MODEL.md) · [Build from source](#build-and-test)
+
+Drag up to 32 files or folders onto `Zero.exe`; it starts immediately without a confirmation prompt. A folder drop includes its nested ordinary files and removes the selected folders when they are empty. Zero does not retain a vault. Volume roots are refused; Zero has no whole-device operation.
 
 For each file, Zero writes an AES-256-GCM encrypted stage on the same volume, authenticates that stage, replaces the selected file's current logical contents with the verified ciphertext, clears its working key, overwrites the file once with random bytes, checks the logical readback, and deletes it. It rejects reparse points, files with other hard links, named data streams, and unsupported file attributes. The whole selection is inspected before the first file is changed, with a limit of 100,000 files.
 
@@ -14,13 +18,22 @@ During inspection, Zero makes read-only Windows queries for each selected file's
 
 ## Quick use
 
-1. Download `Zero.exe` from a release, or [build it](#build-and-test).
-2. Put disposable files in a test folder and drag that folder onto `Zero.exe` to see the behavior.
-3. Drag only files or folders you intend to remove. There is no confirmation prompt.
+1. Open the [latest release](https://github.com/agammann/zero/releases/latest). Download `Zero.exe`, or extract the Windows ZIP to keep the executable and its documentation together. No installer is needed.
+2. Double-click `Zero.exe` without selecting files to read its short usage dialog. Create a folder containing disposable copies for your first run.
+3. Preview that folder with the command below. Then drag it onto `Zero.exe` to process it. A successful direct drop removes the selected files and their empty folders; other files are left alone.
 
 To inspect a selection without changing it, run `./Zero.exe --preview "D:\Disposable\example.txt"` in PowerShell. The preview lists up to 15 selected files and shows the observed storage context. It does not create a vault or perform recovery. Dropping files onto the executable still starts processing immediately.
 
 The advanced commands below are run from PowerShell. Put `--quiet` first to suppress result dialogs; failures are written to `%LOCALAPPDATA%\Zero\last-error.txt` and return exit code 1.
+
+| Task | Command |
+| --- | --- |
+| Inspect files without changing them | `.\Zero.exe --preview "D:\Disposable"` |
+| Run an existing saved selection | `.\Zero.exe --profile DownloadsClean` |
+| List saved selections | `.\Zero.exe --profiles` |
+| Verify a signed receipt | `.\Zero.exe --verify-receipt "D:\Receipts\receipt.json" "D:\trusted-public-key.hex"` |
+
+Preview commands use a visible dialog and do not accept `--quiet`. Profile runs keep their selected folders for reuse. Direct drops remove empty selected folders. If a batch stops, read the error before retrying: earlier files may already be gone, and an interrupted file operation may be completed on a later processing run.
 
 ## Saved and scheduled selections
 
@@ -88,12 +101,22 @@ Run `--agent` manually to poll once, or `--remove-agent` on the target to remove
 
 ## Build and test
 
-Install a current Rust toolchain for Windows and run:
+Install a current stable [Rust toolchain for Windows](https://rust-lang.org/learn/get-started/). The standard MSVC toolchain also needs the C++ build tools and Windows SDK offered during Rust setup. Open PowerShell in the repository directory and run:
 
 ```powershell
 .\build-windows.ps1
 ```
 
 The script tests and builds `Zero.exe`. `Cargo.lock` pins dependencies. The source includes tests for AES-256-GCM staging, ciphertext readback, folder selection, profile filters, storage-context reporting, interruption recovery, receipt signatures, and remote authorization. See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled Rust dependencies.
+
+To run the same source checks used in CI:
+
+```powershell
+cargo fmt --all -- --check
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+```
+
+After building, `.\package-release.ps1` creates Windows and source ZIPs in `dist` and checks that the packaged executable matches `Zero.exe`. The Windows release workflow also runs the tests and checks before publishing a tagged release. These checks cover the app's logical file operations; they do not measure residual data on physical media.
 
 Zero is available under the [MIT License](LICENSE).
