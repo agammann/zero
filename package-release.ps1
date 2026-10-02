@@ -4,7 +4,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $repo = $PSScriptRoot
 $output = Join-Path $repo 'dist'
 New-Item -ItemType Directory -Path $output -Force | Out-Null
-$metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+$metadata = cargo metadata --no-deps --format-version 1 --manifest-path (Join-Path $repo 'Cargo.toml') | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Could not read package version.' }
 $version = $metadata.packages[0].version
 

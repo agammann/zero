@@ -101,6 +101,9 @@ pub(crate) fn unhex<const N: usize>(value: &str) -> AppResult<[u8; N]> {
     if value.len() != N * 2 {
         return Err("incorrect hexadecimal value length".into());
     }
+    if !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("hexadecimal values must contain only ASCII hex digits".into());
+    }
     let mut bytes = [0u8; N];
     for (index, byte) in bytes.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)?;
@@ -229,6 +232,19 @@ pub fn verify_receipt(path: &Path, trusted_public_key: &str) -> AppResult<Receip
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hexadecimal_records_reject_non_ascii_without_panicking() {
+        assert_eq!(unhex::<2>("aB09").unwrap(), [0xab, 0x09]);
+        assert!(unhex::<2>("abxz").is_err());
+        assert!(unhex::<2>("abc").is_err());
+        let malformed_key = format!("€{}", "0".repeat(61));
+        let malformed_signature = format!("0€{}", "0".repeat(124));
+        assert_eq!(malformed_key.len(), 64);
+        assert_eq!(malformed_signature.len(), 128);
+        assert!(unhex::<32>(&malformed_key).is_err());
+        assert!(unhex::<64>(&malformed_signature).is_err());
+    }
 
     #[test]
     fn dpapi_round_trip_and_receipt_tampering_check() {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1
+
+- Reject non-ASCII text in hexadecimal keys, signatures, and job IDs with a normal error instead of panicking at a UTF-8 character boundary. File processing and receipt formats are unchanged.
+- Package release archives correctly when the packaging script is invoked from another working directory.
+- Add direct download and first-run guidance, a command reference, and Windows build prerequisites.
+
 ## 0.6.0
 
 - Refuse selected files that contain named Windows data streams before any encryption or overwrite. The app cannot overwrite those streams through its current file handle, so processing them would give a misleading result.

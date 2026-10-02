@@ -1,6 +1,6 @@
 # Zero: storage and key model
 
-This document describes version 0.6.0's implemented file-level sequence. It is not a certification that every historical copy is gone.
+This document describes version 0.6.1's implemented file-level sequence. It is not a certification that every historical copy is gone.
 
 ## Per-file sequence
 
