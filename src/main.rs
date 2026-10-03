@@ -6,6 +6,8 @@ mod filters;
 mod profiles;
 mod receipts;
 mod remote;
+mod scheduler;
+mod state;
 mod storage;
 
 use aes_gcm::{Aes256Gcm, Nonce, aead::AeadInOut, aead::KeyInit};
@@ -59,6 +61,7 @@ fn run() -> AppResult<()> {
     if quiet {
         args.next();
     }
+    state::initialize(&mut args)?;
     if args.peek().is_some_and(|arg| arg == "--verify-receipt") {
         args.next();
         let path = PathBuf::from(args.next().ok_or("receipt path is required")?);
@@ -720,8 +723,7 @@ impl PendingJournal {
 }
 
 fn state_directory() -> AppResult<PathBuf> {
-    let appdata = env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is unavailable")?;
-    Ok(PathBuf::from(appdata).join("Zero"))
+    state::directory()
 }
 
 fn recover_pending_jobs(state_dir: &Path) -> AppResult<()> {
@@ -1285,7 +1287,7 @@ fn overwrite_and_delete(mut file: File, source: &Path) -> AppResult<()> {
 mod tests {
     use super::*;
 
-    fn test_root(label: &str) -> PathBuf {
+    pub(crate) fn test_root(label: &str) -> PathBuf {
         let mut id = [0u8; 8];
         getrandom::fill(&mut id).unwrap();
         let name: String = id.iter().map(|byte| format!("{byte:02x}")).collect();

@@ -179,44 +179,24 @@ pub fn enroll(
     Ok(())
 }
 
-fn task_name(device_id: &str) -> String {
-    format!("Zero-Agent-{device_id}")
+fn task_name(device_id: &str) -> AppResult<String> {
+    crate::state::task_name(crate::state::TaskKind::Agent, device_id)
 }
 
 fn install_agent(device_id: &str) -> AppResult<()> {
-    let executable = std::env::current_exe()?;
-    let action = format!("\"{}\" --quiet --agent", executable.display());
-    let output = Command::new("schtasks.exe")
-        .args([
-            "/Create",
-            "/F",
-            "/SC",
-            "MINUTE",
-            "/MO",
-            "1",
-            "/RL",
-            "LIMITED",
-            "/TN",
-            &task_name(device_id),
-            "/TR",
-            &action,
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Err(format!(
-            "Task Scheduler could not install the remote agent: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
-    }
-    Ok(())
+    let action = crate::state::task_action(&["--agent".as_ref()])?;
+    crate::scheduler::register(
+        &task_name(device_id)?,
+        &action,
+        crate::scheduler::Schedule::Agent,
+    )
 }
 
 pub fn remove_agent() -> AppResult<()> {
     let state = state_directory()?;
     let config = load_config(&state)?;
     let output = Command::new("schtasks.exe")
-        .args(["/Delete", "/F", "/TN", &task_name(&config.device_id)])
+        .args(["/Delete", "/F", "/TN", &task_name(&config.device_id)?])
         .output()?;
     if !output.status.success() {
         return Err(format!(

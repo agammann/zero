@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.2
+
+- Register scheduled executable and arguments as separate XML fields, verify the stored action before enabling it, and verify again after enabling.
+- Add an explicit state directory for profiles, signing keys, recovery and remote jobs so callers can choose a location shared with Task Scheduler. Existing state is not migrated.
+- Bind new scheduled actions to the chosen directory identity and refuse missing or replaced state before recovery or key access. Tasks in explicit stores have separate identity-qualified names; default task names remain compatible.
+- Include the state and scheduler modules in source release archives.
+
 ## 0.6.1
 
 - Reject non-ASCII text in hexadecimal keys, signatures, and job IDs with a normal error instead of panicking at a UTF-8 character boundary. File processing and receipt formats are unchanged.

@@ -24,7 +24,7 @@ During inspection, Zero makes read-only Windows queries for each selected file's
 
 To inspect a selection without changing it, run `./Zero.exe --preview "D:\Disposable\example.txt"` in PowerShell. The preview lists up to 15 selected files and shows the observed storage context. It does not create a vault or perform recovery. Dropping files onto the executable still starts processing immediately.
 
-The advanced commands below are run from PowerShell. Put `--quiet` first to suppress result dialogs; failures are written to `%LOCALAPPDATA%\Zero\last-error.txt` and return exit code 1.
+The advanced commands below are run from PowerShell. Put `--quiet` first to suppress result dialogs; failures return exit code 1 and are normally written to `last-error.txt` in the selected state directory, which defaults to `%LOCALAPPDATA%\Zero`.
 
 | Task | Command |
 | --- | --- |
@@ -47,7 +47,28 @@ Create a named profile without changing the selected files, then run or schedule
 .\Zero.exe --unschedule DownloadsClean
 ```
 
-Scheduling uses Windows Task Scheduler under the current user. Cadences are `daily`, `weekdays`, or `every-N` for 1–30 days, followed by local `HH:MM` time. A profile keeps its selected folders in place so a later scheduled run can process newly added files. Files absent when the task runs are skipped. Task failures can be inspected in `last-error.txt` and Task Scheduler. A scheduled run has no confirmation prompt.
+Scheduling uses Windows Task Scheduler under the current user. Stay signed in to that Windows account and keep the computer awake and connected to AC power. These tasks do not start on battery power and stop if the computer switches to battery. Cadences are `daily`, `weekdays`, or `every-N` for 1–30 days, followed by local `HH:MM` time. A profile keeps its selected folders in place so a later scheduled run can process newly added files. Files absent when the task runs are skipped. Task failures can be inspected in `last-error.txt` and Task Scheduler. A scheduled run has no confirmation prompt.
+
+### Choosing a shared state location
+
+`--state-dir` requires version 0.6.2 or newer. Version 0.6.1 does not support it; do not pass this option to that version.
+
+Use the leading `--state-dir` option to choose an absolute directory for profiles, signing keys, recovery records, remote enrollment and job history. Put it after `--quiet`, if used, and before the command. Use the same location for subsequent commands:
+
+```powershell
+.\Zero.exe --state-dir "D:\Zero State" --create-profile DownloadsClean "D:\Drop Folder"
+.\Zero.exe --state-dir "D:\Zero State" --preview-profile DownloadsClean
+.\Zero.exe --state-dir "D:\Zero State" --schedule DownloadsClean daily 23:30
+.\Zero.exe --state-dir "D:\Zero State" --unschedule DownloadsClean
+```
+
+Some packaged Windows hosts redirect AppData. A caller and Task Scheduler can then see different directories under the same path and Windows account. Choose a deliberate local state directory outside that redirected location, and keep it outside every selected folder. This option does not copy or migrate existing profiles, keys or job history; a different directory is a separate state store. Continue using the original location for its existing records and trust identity.
+
+New profile and remote-agent tasks retain the chosen state path and its Windows directory identity. They refuse a missing or replaced directory before recovery, key access or processing. This refusal returns exit code 1 without writing `last-error.txt` into an unverified directory; inspect Task Scheduler and the state location before scheduling again. Earlier tasks need to be recreated to gain this check. Task registration stores the executable and arguments separately and checks their exact stored values before enabling the task, then checks again. An unsuccessful check retains a disabled task for inspection; if disabling cannot be confirmed, the error says so. The executable path is limited to 260 UTF-16 units. The executable, quoting, separator, arguments and terminating null must fit Windows' 32,767-unit process command-line limit.
+
+Tasks created with `--state-dir` use names beginning `Zero@` that include the directory identity and distinguish profile tasks from remote agents. Two explicit stores can therefore use the same profile or device name. Commands without this option keep the legacy `Zero-<profile>` and `Zero-Agent-<device>` names. Use the same default or explicit command form when removing a task. If an explicit store is removed or replaced, inspect and remove its old exact task in Task Scheduler; Zero does not fall back to deleting another store's or a legacy task.
+
+The state check does not bind selected files, receipt destinations or the shared queue across different filesystem views. Use paths those contexts can access consistently; preview the selection from the intended execution environment. It does not change the normal same-run file-identity checks or recurring-profile behavior.
 
 Filters are optional when creating a saved profile. This example includes `.log` and `.tmp` files last modified at least 30 days ago, except names starting with `keep`:
 
@@ -118,5 +139,16 @@ cargo clippy --locked --all-targets -- -D warnings
 ```
 
 After building, `.\package-release.ps1` creates Windows and source ZIPs in `dist` and checks that the packaged executable matches `Zero.exe`. The Windows release workflow also runs the tests and checks before publishing a tagged release. These checks cover the app's logical file operations; they do not measure residual data on physical media.
+
+### Scheduler verification: 2026-10-02
+
+A Windows 11 run in a signed-in session on AC power checked version 0.6.2 with fresh local state and disposable files:
+
+- Registered and read back daily, weekday and every-three-day profile schedules, plus the one-minute agent. Executable paths containing spaces and combined profile command lines of 266 and 268 UTF-16 units retained their full arguments.
+- Started one profile task through Task Scheduler and verified its signed receipt. The agent then ran on its minute trigger, processed one signed request and produced a result that passed signature verification.
+- Two explicit state stores used the same profile name without replacing or removing each other's task. The second store's task was never started. An unrelated sentinel file stayed unchanged, and all test tasks were removed.
+- Missing or mismatched bound state, a malformed state identity and a relative state option were refused. The 31 unit tests, formatting, Clippy and an offline release build also passed. The 20-file source archive was extracted and compiled offline.
+
+This verifies one profile execution and one naturally triggered agent request. It does not establish recurrence across days or reboots, operation while signed out or on battery, cross-machine queue delivery, or physical-media erasure.
 
 Zero is available under the [MIT License](LICENSE).

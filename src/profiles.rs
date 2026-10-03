@@ -144,56 +144,13 @@ pub fn list() -> AppResult<Vec<String>> {
 
 pub fn schedule(name: &str, cadence: &str, time: &str) -> AppResult<()> {
     let _ = load(name)?;
-    let parts = time.split(':').collect::<Vec<_>>();
-    if parts.len() != 2
-        || parts[0].len() != 2
-        || parts[1].len() != 2
-        || parts[0].parse::<u8>()? > 23
-        || parts[1].parse::<u8>()? > 59
-    {
-        return Err("time must be HH:MM in local 24-hour time".into());
-    }
-    let task_name = format!("Zero-{name}");
-    let executable = std::env::current_exe()?;
-    let command_line = format!("\"{}\" --quiet --profile {name}", executable.display());
-    let mut command = Command::new("schtasks.exe");
-    command.args([
-        "/Create",
-        "/F",
-        "/TN",
+    let task_name = crate::state::task_name(crate::state::TaskKind::Profile, name)?;
+    let action = crate::state::task_action(&["--profile".as_ref(), name.as_ref()])?;
+    crate::scheduler::register(
         &task_name,
-        "/TR",
-        &command_line,
-        "/ST",
-        time,
-        "/RL",
-        "LIMITED",
-    ]);
-    match cadence {
-        "daily" => {
-            command.args(["/SC", "DAILY"]);
-        }
-        "weekdays" => {
-            command.args(["/SC", "WEEKLY", "/D", "MON,TUE,WED,THU,FRI"]);
-        }
-        value if value.starts_with("every-") => {
-            let days = value.trim_start_matches("every-").parse::<u8>()?;
-            if !(1..=30).contains(&days) {
-                return Err("every-N cadence supports 1-30 days".into());
-            }
-            command.args(["/SC", "DAILY", "/MO", &days.to_string()]);
-        }
-        _ => return Err("cadence must be daily, weekdays, or every-N".into()),
-    }
-    let result = command.output()?;
-    if !result.status.success() {
-        return Err(format!(
-            "Task Scheduler rejected the schedule: {}",
-            String::from_utf8_lossy(&result.stderr)
-        )
-        .into());
-    }
-    Ok(())
+        &action,
+        crate::scheduler::Schedule::Profile { cadence, time },
+    )
 }
 
 pub fn unschedule(name: &str) -> AppResult<()> {
@@ -201,7 +158,12 @@ pub fn unschedule(name: &str) -> AppResult<()> {
         return Err("invalid profile name".into());
     }
     let result = Command::new("schtasks.exe")
-        .args(["/Delete", "/F", "/TN", &format!("Zero-{name}")])
+        .args([
+            "/Delete",
+            "/F",
+            "/TN",
+            &crate::state::task_name(crate::state::TaskKind::Profile, name)?,
+        ])
         .output()?;
     if !result.status.success() {
         return Err(format!(
