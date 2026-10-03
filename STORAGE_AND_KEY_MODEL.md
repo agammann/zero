@@ -1,6 +1,8 @@
 # Zero: storage and key model
 
-This document describes version 0.6.1's implemented file-level sequence. It is not a certification that every historical copy is gone.
+This document describes version 0.6.2's implemented file-level sequence. It is not a certification that every historical copy is gone.
+
+State paths below use the default `%LOCALAPPDATA%\Zero`; a leading `--state-dir` instead selects one explicit store for profiles, keys, recovery and remote-job records. Newly registered tasks retain and check that directory's Windows identity before state access. No records or keys are automatically migrated. This does not establish that other saved paths resolve identically across Windows filesystem views.
 
 ## Per-file sequence
 

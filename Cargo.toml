@@ -1,6 +1,6 @@
 [package]
 name = "zero"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 license = "MIT"
 description = "Encrypted on-disk processing and selected-file cleanup for Windows"

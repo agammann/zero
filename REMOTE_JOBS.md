@@ -10,6 +10,10 @@ The target also signs results with its own separately generated Ed25519 key. The
 
 The same local signing-key store is used by optional receipts and remote messages. This key is not an AES file key and cannot recover deleted data. Losing it prevents verification under the old public key; compromise of the Windows user can allow forged future receipts and jobs.
 
+The default state store is `%LOCALAPPDATA%\Zero`. A leading `--state-dir "D:\Zero State"` selects a separate store for every command, including enrollment, key export, polling and removal. Use the same chosen directory throughout; Zero does not migrate keys or completion history. Newly installed pollers retain its path and directory identity and stop before recovery or state access if the identity changes. See [state location and packaged Windows hosts](README.md#choosing-a-shared-state-location).
+
+Explicit stores also have separate `Zero@…-Agent-<device>` task names. Enroll and remove with the same explicit state option; default-state commands retain the legacy task names. If the original explicit directory no longer exists or has been replaced, remove its old exact task through Task Scheduler after inspection. Zero does not search other stores or delete a legacy task as a fallback.
+
 ## Command and result flow
 
 1. `--send` writes a signed JSON command to `DEVICE/pending/cmd-NONCE.json`. The signature covers format version, device ID, profile name, random job ID, and issue time.
@@ -22,6 +26,6 @@ Command and result signatures authenticate message content and key possession. T
 
 ## Recovery and operation
 
-Scheduled errors are written to `%LOCALAPPDATA%\Zero\last-error.txt` on the target. A successful quiet run clears this error file. A signed result reports `files_completed`, `files_missing`, `files_skipped_filter`, and, for new results, `storage`; a missing path may have been processed before an interruption or removed by something else. The storage field reports Windows observations, not physical erasure. Examine the target before interpreting a partial result.
+Scheduled errors are normally written to `last-error.txt` in the target's chosen state directory. A failed startup state-identity check writes no file there; Task Scheduler records exit code 1. A successful quiet run clears this error file. A signed result reports `files_completed`, `files_missing`, `files_skipped_filter`, and, for new results, `storage`; a missing path may have been processed before an interruption or removed by something else. The storage field reports Windows observations, not physical erasure. Examine the target before interpreting a partial result.
 
 The queue and local state contain path names, profile names, timestamps, and job IDs. Treat them as sensitive metadata. Restrict the shared directory and Windows profile permissions. Deleting the target's local `remote-done` history can weaken replay protection. The target's `--remove-agent` command removes the scheduled poller and enrollment; it does not erase existing queue messages, receipts, or completed-job records.
