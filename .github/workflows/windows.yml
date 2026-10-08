@@ -1,36 +1,60 @@
 name: Windows build and tests
 
 on:
-  push:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
+concurrency:
+  group: zero-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   verify:
-    runs-on: windows-latest
+    runs-on: windows-2025
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
     steps:
-      - uses: actions/checkout@v4
-      - name: Install stable Rust
-        run: rustup update stable
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Tests
-        run: cargo test --locked
-      - name: Lint
-        run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Build
-        run: cargo build --release --locked
-      - name: Whole-volume command stays disabled
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Install pinned Rust
         shell: pwsh
         run: |
-          $testRoot = Join-Path $env:RUNNER_TEMP 'zero-volume-guard'
-          New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
-          $sentinel = Join-Path $testRoot 'keep.txt'
-          Set-Content -LiteralPath $sentinel -Value 'keep'
-          $process = Start-Process -FilePath .\target\release\zero.exe -ArgumentList "--quiet --volume `"$testRoot`"" -WindowStyle Hidden -Wait -PassThru
-          if ($process.ExitCode -ne 1) { throw "The retired command exited with $($process.ExitCode), expected 1." }
-          $errorPath = Join-Path $env:LOCALAPPDATA 'Zero\last-error.txt'
-          if ((Get-Content -LiteralPath $errorPath -Raw) -notmatch 'whole-volume selection is not supported') { throw 'The expected scope error was not recorded.' }
-          if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne 'keep') { throw 'The sentinel changed.' }
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
+          if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed.' }
+          rustup override set 1.98.1
+          if ($LASTEXITCODE -ne 0) { throw 'Rust selection failed.' }
+      - name: Build and check exact source
+        shell: pwsh
+        run: .\build-windows.ps1
+      - name: Verify disposable core journey
+        shell: pwsh
+        run: .\scripts\verify-core.ps1 -Executable .\build\Zero.exe -OutputDirectory "$env:RUNNER_TEMP/zero-core"
+      - name: Package and extract fresh consumers
+        shell: pwsh
+        run: |
+          .\package-release.ps1
+          .\scripts\check-release.ps1 -Directory .\release-artifacts -ExtractTo "$env:RUNNER_TEMP/zero-consumer"
+          $version = (Get-Content .\Cargo.toml | Select-String '^version = "(.*)"').Matches.Groups[1].Value
+          & "$env:RUNNER_TEMP/zero-consumer/source/Zero-$version-Source/build-windows.ps1"
+      - name: Verify delivered Windows executable
+        shell: pwsh
+        run: |
+          $version = (Get-Content .\Cargo.toml | Select-String '^version = "(.*)"').Matches.Groups[1].Value
+          .\scripts\verify-core.ps1 -Executable "$env:RUNNER_TEMP/zero-consumer/windows/Zero-$version/Zero.exe" -OutputDirectory "$env:RUNNER_TEMP/zero-delivered-core"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: zero-release-${{ github.sha }}
+          path: release-artifacts/*
+          if-no-files-found: error
+          retention-days: 30
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: verify
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write

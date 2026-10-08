@@ -4,3 +4,8 @@
 /*.exe
 *.sealed
 *.part
+/build/
+/build-staging/
+/build-history/
+/release-artifacts/
+/release-staging/

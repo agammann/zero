@@ -6,7 +6,6 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Deserialize, Serialize)]
 pub struct Profile {
@@ -157,7 +156,7 @@ pub fn unschedule(name: &str) -> AppResult<()> {
     if !valid_name(name) {
         return Err("invalid profile name".into());
     }
-    let result = Command::new("schtasks.exe")
+    let result = crate::scheduler::command()?
         .args([
             "/Delete",
             "/F",

@@ -2,6 +2,8 @@
 
 Zero is a free, open-source Windows app that processes and removes the files and folders you explicitly select. It works locally without an account, subscription, or API key.
 
+Version 1.0.0 targets Windows 11 x64. It keeps the profile, receipt and remote-job formats from 0.6.2.
+
 [Download Zero for Windows](https://github.com/agammann/zero/releases/latest) · [Read the storage model](STORAGE_AND_KEY_MODEL.md) · [Build from source](#build-and-test)
 
 Drag up to 32 files or folders onto `Zero.exe`; it starts immediately without a confirmation prompt. A folder drop includes its nested ordinary files and removes the selected folders when they are empty. Zero does not retain a vault. Volume roots are refused; Zero has no whole-device operation.
@@ -18,6 +20,8 @@ During inspection, Zero makes read-only Windows queries for each selected file's
 
 ## Quick use
 
+Download the versioned Windows ZIP with `SHA256SUMS`, compare its SHA-256 using `Get-FileHash`, and extract the whole ZIP. `RELEASE.json` identifies the source commit and executable; `BUILD.json` records its compiler and checks. The standalone `Zero.exe` remains available for users who already have the documentation. Use only disposable copies for your first run.
+
 1. Open the [latest release](https://github.com/agammann/zero/releases/latest). Download `Zero.exe`, or extract the Windows ZIP to keep the executable and its documentation together. No installer is needed.
 2. Double-click `Zero.exe` without selecting files to read its short usage dialog. Create a folder containing disposable copies for your first run.
 3. Preview that folder with the command below. Then drag it onto `Zero.exe` to process it. A successful direct drop removes the selected files and their empty folders; other files are left alone.
@@ -28,10 +32,13 @@ The advanced commands below are run from PowerShell. Put `--quiet` first to supp
 
 | Task | Command |
 | --- | --- |
+| Show usage / version | `.\Zero.exe --help` / `.\Zero.exe --version` |
 | Inspect files without changing them | `.\Zero.exe --preview "D:\Disposable"` |
 | Run an existing saved selection | `.\Zero.exe --profile DownloadsClean` |
 | List saved selections | `.\Zero.exe --profiles` |
 | Verify a signed receipt | `.\Zero.exe --verify-receipt "D:\Receipts\receipt.json" "D:\trusted-public-key.hex"` |
+
+Help, version and opening Zero without a selection do not start recovery or processing. An unknown option is refused before pending recovery. To select a file whose name starts with `--`, supply its full absolute path.
 
 Preview commands use a visible dialog and do not accept `--quiet`. Profile runs keep their selected folders for reuse. Direct drops remove empty selected folders. If a batch stops, read the error before retrying: earlier files may already be gone, and an interrupted file operation may be completed on a later processing run.
 
@@ -122,23 +129,24 @@ Run `--agent` manually to poll once, or `--remove-agent` on the target to remove
 
 ## Build and test
 
-Install a current stable [Rust toolchain for Windows](https://rust-lang.org/learn/get-started/). The standard MSVC toolchain also needs the C++ build tools and Windows SDK offered during Rust setup. Open PowerShell in the repository directory and run:
+Read [BUILD.md](BUILD.md) for Rust 1.98.1, the Windows C++ prerequisites, source ZIP use and release checks. In the extracted source or a clone:
 
 ```powershell
 .\build-windows.ps1
+.\scripts\verify-core.ps1 -Executable .\build\Zero.exe
 ```
 
-The script tests and builds `Zero.exe`. `Cargo.lock` pins dependencies. The source includes tests for AES-256-GCM staging, ciphertext readback, folder selection, profile filters, storage-context reporting, interruption recovery, receipt signatures, and remote authorization. See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled Rust dependencies.
+The build checks formatting, all unit tests and Clippy, then writes `build\Zero.exe` and its source/compiler receipt. A failed build keeps the previous successful output. `Cargo.lock` pins dependencies; [third-party notices](THIRD_PARTY_NOTICES.md) include their licenses. The disposable core check uses a new fixture directory and never selects your saved profiles or files. See [verification scope](VERIFIED.md).
 
-To run the same source checks used in CI:
+`.\package-release.ps1` creates matching versioned Windows and source ZIPs, `Zero.exe` and checksums in a fresh `release-artifacts` directory. Package checking verifies exact source blobs and the delivered executable. The Windows source is MIT licensed; no account or API credential is needed.
 
-```powershell
-cargo fmt --all -- --check
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-```
+## Upgrade and recovery
 
-After building, `.\package-release.ps1` creates Windows and source ZIPs in `dist` and checks that the packaged executable matches `Zero.exe`. The Windows release workflow also runs the tests and checks before publishing a tagged release. These checks cover the app's logical file operations; they do not measure residual data on physical media.
+Extract a new Windows release into a separate directory. Do not delete or replace an existing state directory to upgrade: it contains profiles, recovery records, trust keys and remote job history. Version 1.0.0 retains 0.6.2's state and signature formats. Keep receipt public keys available independently for verifying old records.
+
+Existing scheduled tasks point to their original executable. Unschedule them using the original executable and the same default or explicit state option, then schedule again using the new executable after checking its preview. Keep the executable in that stable path. For an agent, use `--remove-agent` with its original state, then enroll the new executable with the same trusted controller key and selected profiles. Keep queue and completed-job records; removing them weakens replay protection.
+
+A failed scheduled job is visible in Task Scheduler's Last Run Result and normally in the selected state's `last-error.txt`. A mismatched bound state refuses access without writing into the replacement directory. Stop the affected exact task in Task Scheduler before investigating. Never redirect an old task at a new empty state store merely to clear an error. Corrupt profiles or recovery records remain available for inspection. Processing commands attempt to finish an interrupted exact file identity; they cannot recover the original plaintext. Read [the recovery sequence](STORAGE_AND_KEY_MODEL.md) before retrying.
 
 ### Scheduler verification: 2026-10-02
 

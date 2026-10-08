@@ -4,6 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -96,6 +97,17 @@ fn schtasks() -> AppResult<PathBuf> {
         return Err("could not locate the Windows system directory".into());
     }
     Ok(PathBuf::from(OsString::from_wide(&buffer[..length as usize])).join("schtasks.exe"))
+}
+
+fn hidden_command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    // Zero has no console. Scheduler subprocesses must not create one for each operation.
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    command
+}
+
+pub fn command() -> AppResult<Command> {
+    Ok(hidden_command(&schtasks()?))
 }
 
 fn text(value: &OsStr) -> AppResult<String> {
@@ -316,11 +328,17 @@ fn decode_xml(bytes: &[u8]) -> AppResult<String> {
 }
 
 fn query(program: &Path, name: &str) -> AppResult<String> {
-    let output = Command::new(program)
+    let output = hidden_command(program)
         .args(["/Query", "/TN", name, "/XML"])
         .output()?;
     if !output.status.success() {
-        return Err("could not read back the registered task".into());
+        return Err(format!(
+            "could not read back the registered task ({}): {}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
     }
     decode_xml(&output.stdout)
 }
@@ -388,7 +406,7 @@ pub fn register(name: &str, action: &Action, schedule: Schedule<'_>) -> AppResul
     let xml = document(action, &sid, &trigger(schedule, &now)?)?;
     let mut temporary = TemporaryXml::create(&xml)?;
     let program = schtasks()?;
-    let result = Command::new(&program)
+    let result = hidden_command(&program)
         .args(["/Create", "/F", "/TN", name, "/XML"])
         .arg(&temporary.path)
         .output()?;
@@ -405,17 +423,23 @@ pub fn register(name: &str, action: &Action, schedule: Schedule<'_>) -> AppResul
     drop(temporary);
     let activate = || -> AppResult<()> {
         verify(&query(&program, name)?, action, &sid, false)?;
-        let result = Command::new(&program)
+        let result = hidden_command(&program)
             .args(["/Change", "/TN", name, "/ENABLE"])
             .output()?;
         if !result.status.success() {
-            return Err("Task Scheduler could not enable the verified task".into());
+            return Err(format!(
+                "Task Scheduler could not enable the verified task ({}): {}{}",
+                result.status,
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            )
+            .into());
         }
         verify(&query(&program, name)?, action, &sid, true)
     };
     if let Err(error) = activate() {
         // Keep the named task for inspection; never delete a potentially changed task.
-        let disabled = Command::new(&program)
+        let disabled = hidden_command(&program)
             .args(["/Change", "/TN", name, "/DISABLE"])
             .output()
             .is_ok_and(|output| output.status.success())

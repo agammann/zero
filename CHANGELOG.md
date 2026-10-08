@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.0
+
+- Windows selected-file cleanup, profiles, filters, signed receipts and authenticated queue jobs retain the 0.6.2 formats.
+- Help, version and empty-selection startup do not attempt pending recovery; unknown options fail before processing.
+- Update serde_json to 1.0.151.
+- Run scheduler subprocesses without creating console windows; retain their exit status and output when registration or readback fails.
+- Matching source and Windows ZIPs, standalone executable, complete file manifests, compiler/build receipts and SHA-256 checksums.
+- Staged builds preserve previous successful output; release packaging refuses changed inputs and existing output.
+- Newcomer, developer, upgrade and recovery instructions, disposable executable checks and pinned release CI.
+
 ## 0.6.2
 
 - Register scheduled executable and arguments as separate XML fields, verify the stored action before enabling it, and verify again after enabling.

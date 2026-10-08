@@ -1,6 +1,6 @@
 # Zero: storage and key model
 
-This document describes version 0.6.2's implemented file-level sequence. It is not a certification that every historical copy is gone.
+This document describes version 1.0.0's implemented file-level sequence. It is not a certification that every historical copy is gone.
 
 State paths below use the default `%LOCALAPPDATA%\Zero`; a leading `--state-dir` instead selects one explicit store for profiles, keys, recovery and remote-job records. Newly registered tasks retain and check that directory's Windows identity before state access. No records or keys are automatically migrated. This does not establish that other saved paths resolve identically across Windows filesystem views.
 
@@ -19,7 +19,7 @@ After success, no encrypted file or per-file AES key is intentionally retained. 
 ## Interruption and errors
 
 - An ordinary error before the recovery record leaves the source's current logical bytes unchanged; closing the stage removes it.
-- Once a recovery record exists, the next Zero run attempts to finish by overwriting and deleting the exact same file identity. This avoids leaving a partly encrypted original after an interruption. It does not reconstruct or resume the AES operation.
+- Once a recovery record exists, the next processing or agent run attempts to finish by overwriting and deleting the exact same file identity. This avoids leaving a partly encrypted original after an interruption. It does not reconstruct or resume the AES operation.
 - Recovery of an already-started operation finishes independently of current profile filters, because that selected file may already contain partial ciphertext.
 - If a file identity changes, a file is inaccessible, storage fails, or a recovery record is corrupt, Zero stops and keeps that record for inspection. It does not silently process a replacement path.
 - A sudden power loss, filesystem damage, or storage/controller behavior can defeat cleanup. Windows delete-on-close is a process-lifetime behavior, not a power-loss guarantee.

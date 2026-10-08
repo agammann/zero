@@ -61,6 +61,30 @@ fn run() -> AppResult<()> {
     if quiet {
         args.next();
     }
+    // Informational commands never initialize state or attempt pending recovery.
+    if args
+        .peek()
+        .is_some_and(|arg| arg == "--help" || arg == "--version")
+    {
+        let command = args.next().unwrap();
+        if args.next().is_some() {
+            return Err("informational commands do not accept additional arguments".into());
+        }
+        let message = if command == "--version" {
+            format!("Zero {}", env!("CARGO_PKG_VERSION"))
+        } else {
+            format!(
+                "Zero {}\n\nProcess only the files or folders you explicitly select. Processing starts immediately and cannot be undone through Zero.\n\n--preview PATH: inspect without changing files\n--create-profile NAME PATH: save a selection\n--preview-profile NAME: inspect its matching files\n--profile NAME: process its saved selection\n--schedule NAME daily|weekdays|every-N HH:MM\n--unschedule NAME: remove its schedule\n--profiles: list saved selections\n\nPut --quiet first to suppress dialogs, followed by an optional --state-dir ABSOLUTE_PATH. Read README.md for filters, receipts, remote jobs and recovery. Scheduled tasks require a signed-in, awake, AC-powered session. Logical file cleanup does not erase backups, snapshots or historical physical blocks.",
+                env!("CARGO_PKG_VERSION")
+            )
+        };
+        if quiet {
+            println!("{message}");
+        } else {
+            show_dialog("Zero", &message);
+        }
+        return Ok(());
+    }
     state::initialize(&mut args)?;
     if args.peek().is_some_and(|arg| arg == "--verify-receipt") {
         args.next();
@@ -398,6 +422,26 @@ fn run() -> AppResult<()> {
             FileFilters::default(),
         )
     };
+    if !from_profile {
+        if sources.is_empty() {
+            if !quiet {
+                show_dialog(
+                    "Zero",
+                    "Drag explicitly selected files or folders onto Zero.exe. Processing starts immediately and cannot be undone. Use --help for commands and --preview PATH to inspect first.",
+                );
+            }
+            return Ok(());
+        }
+        if sources
+            .iter()
+            .any(|path| path.to_str().is_some_and(|value| value.starts_with("--")))
+        {
+            return Err("unknown option; use --help for supported commands".into());
+        }
+        if sources.len() > 32 {
+            return Err("select at most 32 files or folders per drop".into());
+        }
+    }
     recover_pending_jobs(&state_directory()?)?;
     let sources: Vec<PathBuf> = if from_profile {
         sources.into_iter().filter(|path| path.exists()).collect()
@@ -1580,6 +1624,29 @@ mod tests {
         assert!(!source.exists());
         assert!(!stage_path.exists());
         assert!(!journal.path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_refuses_replacement_and_keeps_its_record() {
+        let root = test_root("recovery-replacement");
+        let state = root.join("state");
+        let source = root.join("selected.bin");
+        let stage_path = root.join("encrypted-stage.tmp");
+        fs::write(&source, b"original fixture").unwrap();
+        fs::write(&stage_path, b"encrypted fixture").unwrap();
+        let file = open_for_destroy(&source).unwrap();
+        let stage = open_for_destroy(&stage_path).unwrap();
+        let journal = PendingJournal::create(&source, &file, &stage_path, &stage, &state).unwrap();
+        let record = fs::read(&journal.path).unwrap();
+        drop(file);
+        drop(stage);
+        fs::rename(&source, root.join("original.bin")).unwrap();
+        fs::write(&source, b"replacement must remain").unwrap();
+        assert!(recover_pending_jobs(&state).is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"replacement must remain");
+        assert_eq!(fs::read(&stage_path).unwrap(), b"encrypted fixture");
+        assert_eq!(fs::read(&journal.path).unwrap(), record);
         fs::remove_dir_all(root).unwrap();
     }
 
