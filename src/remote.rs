@@ -11,7 +11,6 @@ use std::io::Write;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const COMMAND_DOMAIN: &[u8] = b"zero-remote-command-v1\0";
@@ -195,7 +194,7 @@ fn install_agent(device_id: &str) -> AppResult<()> {
 pub fn remove_agent() -> AppResult<()> {
     let state = state_directory()?;
     let config = load_config(&state)?;
-    let output = Command::new("schtasks.exe")
+    let output = crate::scheduler::command()?
         .args(["/Delete", "/F", "/TN", &task_name(&config.device_id)?])
         .output()?;
     if !output.status.success() {
