@@ -8,7 +8,7 @@ description = "Encrypted on-disk processing and selected-file cleanup for Window
 [dependencies]
 aes-gcm = { version = "=0.11.1", features = ["zeroize"] }
 getrandom = "=0.4.3"
-sha2 = "=0.10.9"
+sha2 = "=0.11.1"
 zeroize = "=1.9.0"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.151"
