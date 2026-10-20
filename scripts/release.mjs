@@ -2,6 +2,48 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
+const MAX_RELEASE_FILE_BYTES = 64n * 1024n * 1024n;
+
+export const readRegularFile = (location) => {
+  const handle = fs.openSync(location, fs.constants.O_RDONLY);
+  try {
+    const opened = fs.fstatSync(handle, { bigint: true });
+    const named = fs.lstatSync(location, { bigint: true });
+    if (
+      !opened.isFile() ||
+      !named.isFile() ||
+      opened.dev !== named.dev ||
+      opened.ino !== named.ino
+    ) {
+      throw new Error("Artifact changed or is not a regular file.");
+    }
+    if (opened.size > MAX_RELEASE_FILE_BYTES) {
+      throw new Error("Artifact exceeds the release file size limit.");
+    }
+    const data = Buffer.alloc(Number(opened.size));
+    let offset = 0;
+    while (offset < data.length) {
+      const count = fs.readSync(handle, data, offset, data.length - offset, null);
+      if (count === 0) throw new Error("Artifact changed while being read.");
+      offset += count;
+    }
+    if (fs.readSync(handle, Buffer.alloc(1), 0, 1, null) !== 0) {
+      throw new Error("Artifact changed while being read.");
+    }
+    const finished = fs.fstatSync(handle, { bigint: true });
+    if (
+      finished.size !== opened.size ||
+      finished.mtimeNs !== opened.mtimeNs ||
+      finished.ctimeNs !== opened.ctimeNs
+    ) {
+      throw new Error("Artifact changed while being read.");
+    }
+    return data;
+  } finally {
+    fs.closeSync(handle);
+  }
+};
+
 const publish = async ({ github, context, core }) => {
   if (
     context.eventName !== "push" ||
@@ -96,9 +138,7 @@ const publish = async ({ github, context, core }) => {
   const checksumLines = [];
   const readFile = (filename) => {
     const location = path.join(directory, filename);
-    if (!fs.lstatSync(location).isFile())
-      throw new Error("Artifact is not a regular file.");
-    return fs.readFileSync(location);
+    return readRegularFile(location);
   };
   const digest = (data) =>
     "sha256:" + crypto.createHash("sha256").update(data).digest("hex");
