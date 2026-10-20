@@ -1,6 +1,6 @@
 # Build Zero
 
-Zero 1.0.0 supports Windows 11 x64. The published executable uses Rust 1.98.1 with the standard MSVC target. Install Rust through [rustup](https://rust-lang.org/tools/install/) and the Visual Studio C++ build tools and Windows SDK. In PowerShell:
+Zero 1.0.1 supports Windows 11 x64. The published executable uses Rust 1.98.1 with the standard MSVC target. Install Rust through [rustup](https://rust-lang.org/tools/install/) and the Visual Studio C++ build tools and Windows SDK. In PowerShell:
 
 ```powershell
 rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy

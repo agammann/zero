@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1
+
+- Read release artifacts through one verified file descriptor, with a 64 MiB bound and checks for path replacement or mutation while reading.
+- Exercise ordinary files, linked paths, oversized files, path swaps and concurrent growth in the Windows release-reader test.
+- Keep file processing, profiles, signed receipts and remote-job formats compatible with 1.0.0.
+
 ## 1.0.0
 
 - Windows selected-file cleanup, profiles, filters, signed receipts and authenticated queue jobs retain the 0.6.2 formats.
