@@ -2,13 +2,14 @@ use crate::AppResult;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use std::ffi::c_void;
 use std::io;
+use std::path::Path;
 use std::ptr;
 use zeroize::Zeroizing;
 
 // A DPAPI blob in writable state is not a writer credential: another Windows
 // user can create a machine-scope blob. CredRead uses this token's user store.
 const TARGET: &str = "Zero/recovery-record-signing-key/v1";
-const DOMAIN: &[u8] = b"zero-pending-recovery-v2\0";
+const PENDING_DOMAIN: &[u8] = b"zero-pending-recovery-v2\0";
 const CRED_TYPE_GENERIC: u32 = 1;
 const CRED_PERSIST_LOCAL_MACHINE: u32 = 2;
 const ERROR_NOT_FOUND: i32 = 1168;
@@ -148,21 +149,70 @@ fn create_key() -> AppResult<SigningKey> {
     read_key()?.ok_or_else(|| "Windows did not retain the recovery credential".into())
 }
 
-fn message(body: &[u8]) -> Vec<u8> {
-    let mut message = Vec::with_capacity(DOMAIN.len() + body.len());
-    message.extend_from_slice(DOMAIN);
+fn message(domain: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(domain.len() + body.len());
+    message.extend_from_slice(domain);
     message.extend_from_slice(body);
     message
 }
 
 pub fn sign(body: &[u8]) -> AppResult<[u8; 64]> {
-    Ok(create_key()?.sign(&message(body)).to_bytes())
+    sign_for(PENDING_DOMAIN, body)
 }
 
 pub fn verify(body: &[u8], signature: &[u8; 64]) -> AppResult<()> {
+    verify_for(PENDING_DOMAIN, body, signature)
+}
+
+pub fn sign_for(domain: &[u8], body: &[u8]) -> AppResult<[u8; 64]> {
+    Ok(create_key()?.sign(&message(domain, body)).to_bytes())
+}
+
+pub fn verify_for(domain: &[u8], body: &[u8], signature: &[u8; 64]) -> AppResult<()> {
     let key =
         read_key()?.ok_or("recovery credential is unavailable; automatic recovery refused")?;
     key.verifying_key()
-        .verify(&message(body), &Signature::from_bytes(signature))
-        .map_err(|_| "recovery record authentication failed".into())
+        .verify(&message(domain, body), &Signature::from_bytes(signature))
+        .map_err(|_| "state record authentication failed".into())
+}
+
+fn scoped_message(domain: &[u8], state_dir: &Path, label: &str, body: &[u8]) -> AppResult<Vec<u8>> {
+    let identity = crate::state::directory_identity(state_dir)?;
+    let label_size: u32 = label.len().try_into()?;
+    let mut message = message(domain, &[]);
+    message.extend_from_slice(&identity.volume.to_le_bytes());
+    message.extend_from_slice(&identity.index.to_le_bytes());
+    message.extend_from_slice(&identity.creation_time.to_le_bytes());
+    message.extend_from_slice(&label_size.to_le_bytes());
+    message.extend_from_slice(label.as_bytes());
+    message.extend_from_slice(body);
+    Ok(message)
+}
+
+pub fn sign_scoped(
+    domain: &[u8],
+    state_dir: &Path,
+    label: &str,
+    body: &[u8],
+) -> AppResult<[u8; 64]> {
+    Ok(create_key()?
+        .sign(&scoped_message(domain, state_dir, label, body)?)
+        .to_bytes())
+}
+
+pub fn verify_scoped(
+    domain: &[u8],
+    state_dir: &Path,
+    label: &str,
+    body: &[u8],
+    signature: &[u8; 64],
+) -> AppResult<()> {
+    let key =
+        read_key()?.ok_or("state authentication credential is unavailable; processing refused")?;
+    key.verifying_key()
+        .verify(
+            &scoped_message(domain, state_dir, label, body)?,
+            &Signature::from_bytes(signature),
+        )
+        .map_err(|_| "state record authentication failed".into())
 }
