@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 
 // A DPAPI blob in writable state is not a writer credential: another Windows
 // user can create a machine-scope blob. CredRead uses this token's user store.
-const TARGET: &str = "Zero/recovery-record-signing-key/v1";
+const RECOVERY_TARGET: &str = "Zero/recovery-record-signing-key/v1";
 const PENDING_DOMAIN: &[u8] = b"zero-pending-recovery-v2\0";
 const CRED_TYPE_GENERIC: u32 = 1;
 const CRED_PERSIST_LOCAL_MACHINE: u32 = 2;
@@ -65,7 +65,7 @@ impl CredentialLock {
             WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Self(handle)),
             _ => {
                 unsafe { CloseHandle(handle) };
-                Err("could not acquire the recovery credential lock".into())
+                Err("could not acquire the signing credential lock".into())
             }
         }
     }
@@ -80,25 +80,25 @@ impl Drop for CredentialLock {
     }
 }
 
-fn target_name() -> Vec<u16> {
-    TARGET.encode_utf16().chain([0]).collect()
+fn target_name(target: &str) -> Vec<u16> {
+    target.encode_utf16().chain([0]).collect()
 }
 
-fn read_key() -> AppResult<Option<SigningKey>> {
+fn read_key(target: &str) -> AppResult<Option<SigningKey>> {
     let mut value = ptr::null_mut();
-    let target = target_name();
-    let ok = unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut value) };
+    let wide_target = target_name(target);
+    let ok = unsafe { CredReadW(wide_target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut value) };
     if ok == 0 {
         let error = io::Error::last_os_error();
         if error.raw_os_error() == Some(ERROR_NOT_FOUND) {
             return Ok(None);
         }
         return Err(
-            format!("could not read the current user's recovery credential: {error}").into(),
+            format!("could not read the current user's signing credential: {error}").into(),
         );
     }
     if value.is_null() {
-        return Err("Windows returned an empty recovery credential".into());
+        return Err("Windows returned an empty signing credential".into());
     }
     let result = (|| {
         let stored = unsafe { &*value };
@@ -107,7 +107,7 @@ fn read_key() -> AppResult<Option<SigningKey>> {
             || stored.blob_size != 32
             || stored.blob.is_null()
         {
-            return Err("recovery credential has an unsupported format".into());
+            return Err("signing credential has an unsupported format".into());
         }
         let mut seed = Zeroizing::new([0u8; 32]);
         seed.copy_from_slice(unsafe { std::slice::from_raw_parts(stored.blob, 32) });
@@ -117,18 +117,22 @@ fn read_key() -> AppResult<Option<SigningKey>> {
     result
 }
 
-fn create_key() -> AppResult<SigningKey> {
+fn create_key(target: &str) -> AppResult<SigningKey> {
     let _lock = CredentialLock::acquire()?;
-    if let Some(key) = read_key()? {
+    if let Some(key) = read_key(target)? {
         return Ok(key);
     }
+    write_key(target)
+}
+
+fn write_key(target: &str) -> AppResult<SigningKey> {
     let mut seed = Zeroizing::new([0u8; 32]);
     getrandom::fill(&mut *seed)?;
-    let mut target = target_name();
+    let mut wide_target = target_name(target);
     let value = Credential {
         flags: 0,
         kind: CRED_TYPE_GENERIC,
-        target_name: target.as_mut_ptr(),
+        target_name: wide_target.as_mut_ptr(),
         comment: ptr::null_mut(),
         last_written: [0, 0],
         blob_size: seed.len() as u32,
@@ -141,12 +145,41 @@ fn create_key() -> AppResult<SigningKey> {
     };
     if unsafe { CredWriteW(&value, 0) } == 0 {
         return Err(format!(
-            "could not save the current user's recovery credential: {}",
+            "could not save the current user's signing credential: {}",
             io::Error::last_os_error()
         )
         .into());
     }
-    read_key()?.ok_or_else(|| "Windows did not retain the recovery credential".into())
+    read_key(target)?.ok_or_else(|| "Windows did not retain the signing credential".into())
+}
+
+fn receipt_target(state_dir: &Path) -> AppResult<String> {
+    let identity = crate::state::directory_identity(state_dir)?;
+    Ok(format!(
+        "Zero/receipt-result-signing-key/v1/{:08x}-{:016x}-{:016x}",
+        identity.volume, identity.index, identity.creation_time
+    ))
+}
+
+pub fn receipt_key(state_dir: &Path) -> AppResult<SigningKey> {
+    let target = receipt_target(state_dir)?;
+    read_key(&target)?.ok_or_else(|| {
+        "receipt/result signing credential is unavailable; initialize it explicitly after reviewing legacy keys".into()
+    })
+}
+
+pub fn initialize_receipt_key(state_dir: &Path) -> AppResult<SigningKey> {
+    let target = receipt_target(state_dir)?;
+    let _lock = CredentialLock::acquire()?;
+    if let Some(key) = read_key(&target)? {
+        return Ok(key);
+    }
+    if state_dir.join("receipt-signing-key.dpapi").try_exists()?
+        || state_dir.join("receipt-public-key.hex").try_exists()?
+    {
+        return Err("legacy receipt/result signing state requires operator-reviewed migration or explicit rotation; no key was imported or replaced".into());
+    }
+    write_key(&target)
 }
 
 fn message(domain: &[u8], body: &[u8]) -> Vec<u8> {
@@ -165,12 +198,14 @@ pub fn verify(body: &[u8], signature: &[u8; 64]) -> AppResult<()> {
 }
 
 pub fn sign_for(domain: &[u8], body: &[u8]) -> AppResult<[u8; 64]> {
-    Ok(create_key()?.sign(&message(domain, body)).to_bytes())
+    Ok(create_key(RECOVERY_TARGET)?
+        .sign(&message(domain, body))
+        .to_bytes())
 }
 
 pub fn verify_for(domain: &[u8], body: &[u8], signature: &[u8; 64]) -> AppResult<()> {
-    let key =
-        read_key()?.ok_or("recovery credential is unavailable; automatic recovery refused")?;
+    let key = read_key(RECOVERY_TARGET)?
+        .ok_or("recovery credential is unavailable; automatic recovery refused")?;
     key.verifying_key()
         .verify(&message(domain, body), &Signature::from_bytes(signature))
         .map_err(|_| "state record authentication failed".into())
@@ -195,7 +230,7 @@ pub fn sign_scoped(
     label: &str,
     body: &[u8],
 ) -> AppResult<[u8; 64]> {
-    Ok(create_key()?
+    Ok(create_key(RECOVERY_TARGET)?
         .sign(&scoped_message(domain, state_dir, label, body)?)
         .to_bytes())
 }
@@ -207,8 +242,8 @@ pub fn verify_scoped(
     body: &[u8],
     signature: &[u8; 64],
 ) -> AppResult<()> {
-    let key =
-        read_key()?.ok_or("state authentication credential is unavailable; processing refused")?;
+    let key = read_key(RECOVERY_TARGET)?
+        .ok_or("state authentication credential is unavailable; processing refused")?;
     key.verifying_key()
         .verify(
             &scoped_message(domain, state_dir, label, body)?,

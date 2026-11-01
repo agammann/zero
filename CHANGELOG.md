@@ -4,6 +4,7 @@
 
 - Sign new pending recovery records with a key held in the current Windows user's Credential Manager. Automatic recovery refuses older unsigned records and leaves them intact for manual review.
 - Authenticate saved profiles, remote enrollment, and interrupted remote working snapshots with the same user-bound credential, using separate signature domains. Older unsigned state stops for operator review before file processing.
+- Keep new receipt and remote-result signing keys in the current user's Credential Manager, with explicit per-store initialization. Legacy state-held keys are never imported or rotated automatically.
 
 ## 1.0.1
 
