@@ -12,6 +12,8 @@ The same local signing-key store is used by optional receipts and remote message
 
 The default state store is `%LOCALAPPDATA%\Zero`. A leading `--state-dir "D:\Zero State"` selects a separate store for every command, including enrollment, key export, polling and removal. Use the same chosen directory throughout; Zero does not migrate keys or completion history. Newly installed pollers retain its path and directory identity and stop before recovery or state access if the identity changes. See [state location and packaged Windows hosts](README.md#choosing-a-shared-state-location).
 
+Current builds authenticate the saved profile, enrollment, and local working snapshot with a key held in the target Windows user's Credential Manager. These records are bound to the state directory's Windows identity, and profiles are bound to their saved names. A later poll under the same account verifies them before processing files. An older unsigned enrollment or snapshot stops the poll and remains for operator review; read the upgrade procedure in README.md before restarting an older task.
+
 Explicit stores also have separate `Zero@…-Agent-<device>` task names. Enroll and remove with the same explicit state option; default-state commands retain the legacy task names. If the original explicit directory no longer exists or has been replaced, remove its old exact task through Task Scheduler after inspection. Zero does not search other stores or delete a legacy task as a fallback.
 
 ## Command and result flow

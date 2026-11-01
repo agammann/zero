@@ -1,6 +1,7 @@
 use crate::filters::FileFilters;
 use crate::profiles;
 use crate::receipts::{hex, signing_key, unhex, write_receipt};
+use crate::recovery;
 use crate::storage::StorageSummary;
 use crate::{AppResult, FileIdentity, collect_selection, process_one_with_filter, state_directory};
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
@@ -15,6 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const COMMAND_DOMAIN: &[u8] = b"zero-remote-command-v1\0";
 const RESULT_DOMAIN: &[u8] = b"zero-remote-result-v1\0";
+const CONFIG_DOMAIN: &[u8] = b"zero-remote-config-v2\0";
+const SNAPSHOT_DOMAIN: &[u8] = b"zero-remote-snapshot-v3\0";
 
 #[derive(Clone, Deserialize, Serialize)]
 struct DeviceConfig {
@@ -23,6 +26,14 @@ struct DeviceConfig {
     queue: Vec<u16>,
     controller_public_key: String,
     allowed_profiles: Vec<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SignedDeviceConfig {
+    version: u8,
+    config: DeviceConfig,
+    signature: String,
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -55,6 +66,14 @@ struct Snapshot {
     receipt_directory: Option<Vec<u16>>,
     #[serde(default)]
     filters: FileFilters,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SignedSnapshot {
+    version: u8,
+    snapshot: Snapshot,
+    signature: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -123,7 +142,24 @@ fn config_path(state_dir: &Path) -> PathBuf {
 }
 
 fn load_config(state_dir: &Path) -> AppResult<DeviceConfig> {
-    let config: DeviceConfig = read_limited(&config_path(state_dir), 64 * 1024)?;
+    let record: serde_json::Value = read_limited(&config_path(state_dir), 64 * 1024)?;
+    if record.get("version").and_then(serde_json::Value::as_u64) == Some(1) {
+        return Err(
+            "unsigned legacy remote enrollment requires operator review and re-enrollment".into(),
+        );
+    }
+    let signed: SignedDeviceConfig = serde_json::from_value(record)?;
+    if signed.version != 2 {
+        return Err("remote device configuration is invalid".into());
+    }
+    recovery::verify_scoped(
+        CONFIG_DOMAIN,
+        state_dir,
+        "",
+        &serde_json::to_vec(&signed.config)?,
+        &unhex::<64>(&signed.signature)?,
+    )?;
+    let config = signed.config;
     if config.version != 1
         || !safe_name(&config.device_id)
         || config.allowed_profiles.is_empty()
@@ -134,6 +170,16 @@ fn load_config(state_dir: &Path) -> AppResult<DeviceConfig> {
     }
     let _ = unhex::<32>(&config.controller_public_key)?;
     Ok(config)
+}
+
+fn sign_config(state_dir: &Path, config: DeviceConfig) -> AppResult<SignedDeviceConfig> {
+    let signature =
+        recovery::sign_scoped(CONFIG_DOMAIN, state_dir, "", &serde_json::to_vec(&config)?)?;
+    Ok(SignedDeviceConfig {
+        version: 2,
+        config,
+        signature: hex(&signature),
+    })
 }
 
 pub fn export_public_key(path: &Path) -> AppResult<()> {
@@ -170,7 +216,8 @@ pub fn enroll(
     };
     let state = state_directory()?;
     fs::create_dir_all(&state)?;
-    write_new(&config_path(&state), &config)?;
+    let signed = sign_config(&state, config)?;
+    write_new(&config_path(&state), &signed)?;
     if let Err(error) = install_agent(device_id) {
         let _ = fs::remove_file(config_path(&state));
         return Err(error);
@@ -304,6 +351,42 @@ fn snapshot(command: &CommandBody, queue: &Path) -> AppResult<Snapshot> {
     })
 }
 
+fn sign_snapshot(state_dir: &Path, snapshot: Snapshot) -> AppResult<SignedSnapshot> {
+    let signature = recovery::sign_scoped(
+        SNAPSHOT_DOMAIN,
+        state_dir,
+        "",
+        &serde_json::to_vec(&snapshot)?,
+    )?;
+    Ok(SignedSnapshot {
+        version: 3,
+        snapshot,
+        signature: hex(&signature),
+    })
+}
+
+fn load_snapshot(state_dir: &Path, path: &Path) -> AppResult<Snapshot> {
+    let record: serde_json::Value = read_limited(path, 16 * 1024 * 1024)?;
+    if matches!(
+        record.get("version").and_then(serde_json::Value::as_u64),
+        Some(1 | 2)
+    ) {
+        return Err("unsigned legacy remote snapshot requires operator review".into());
+    }
+    let signed: SignedSnapshot = serde_json::from_value(record)?;
+    if signed.version != 3 {
+        return Err("remote snapshot format is unsupported".into());
+    }
+    recovery::verify_scoped(
+        SNAPSHOT_DOMAIN,
+        state_dir,
+        "",
+        &serde_json::to_vec(&signed.snapshot)?,
+        &unhex::<64>(&signed.signature)?,
+    )?;
+    Ok(signed.snapshot)
+}
+
 fn process_snapshot(snapshot: &Snapshot) -> AppResult<(usize, usize, usize, StorageSummary)> {
     if !(1..=2).contains(&snapshot.version)
         || (snapshot.version == 1 && snapshot.filters != FileFilters::default())
@@ -435,14 +518,15 @@ pub fn poll_once() -> AppResult<usize> {
             result
         } else {
             let captured: Snapshot = if working.try_exists()? {
-                read_limited(&working, 16 * 1024 * 1024)?
+                load_snapshot(&state, &working)?
             } else {
                 let captured = snapshot(&command.body, &queue)?;
-                if serde_json::to_vec(&captured)?.len() > 16 * 1024 * 1024 {
+                let signed = sign_snapshot(&state, captured)?;
+                if serde_json::to_vec(&signed)?.len() > 16 * 1024 * 1024 {
                     return Err("remote snapshot exceeds the recovery size limit".into());
                 }
-                write_new(&working, &captured)?;
-                captured
+                write_new(&working, &signed)?;
+                signed.snapshot
             };
             if captured.command != command.body {
                 return Err("remote recovery snapshot does not match the signed command".into());
@@ -556,5 +640,106 @@ mod tests {
         verify_signed_result(&result, &result.public_key).unwrap();
         result.body.storage.as_mut().unwrap().fixed = 2;
         assert!(verify_signed_result(&result, &result.public_key).is_err());
+    }
+
+    #[test]
+    fn enrollment_and_working_snapshot_require_current_user_signatures() {
+        let root = crate::tests::test_root("remote-state-auth");
+        let config = DeviceConfig {
+            version: 1,
+            device_id: "synthetic".to_owned(),
+            queue: vec![1],
+            controller_public_key: "11".repeat(32),
+            allowed_profiles: vec!["benign".to_owned()],
+        };
+        let signed_config = sign_config(&root, config).unwrap();
+        let config_file = config_path(&root);
+        fs::write(&config_file, serde_json::to_vec(&signed_config).unwrap()).unwrap();
+        assert_eq!(load_config(&root).unwrap().device_id, "synthetic");
+        let other_state = crate::tests::test_root("remote-state-replay");
+        fs::copy(&config_file, config_path(&other_state)).unwrap();
+        assert!(load_config(&other_state).is_err());
+        let mut altered_config = serde_json::to_value(&signed_config).unwrap();
+        altered_config["config"]["controller_public_key"] = serde_json::json!("22".repeat(32));
+        fs::write(&config_file, serde_json::to_vec(&altered_config).unwrap()).unwrap();
+        assert!(
+            load_config(&root)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("authentication failed")
+        );
+        fs::write(
+            &config_file,
+            serde_json::to_vec(&signed_config.config).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            load_config(&root)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("unsigned legacy remote enrollment")
+        );
+
+        let command = CommandBody {
+            version: 1,
+            device_id: "synthetic".to_owned(),
+            profile: "benign".to_owned(),
+            nonce: "aa".repeat(16),
+            issued_unix_seconds: 1,
+        };
+        let snapshot = Snapshot {
+            version: 2,
+            command,
+            files: vec![SnapshotFile {
+                path: vec![1],
+                identity: FileIdentity {
+                    volume: 1,
+                    index: 2,
+                    creation_time: 3,
+                },
+            }],
+            receipt_directory: None,
+            filters: FileFilters::default(),
+        };
+        let signed_snapshot = sign_snapshot(&root, snapshot).unwrap();
+        let working_file = root.join("working.json");
+        fs::write(&working_file, serde_json::to_vec(&signed_snapshot).unwrap()).unwrap();
+        assert_eq!(
+            load_snapshot(&root, &working_file).unwrap().files[0].path,
+            [1]
+        );
+        let replayed = other_state.join("working.json");
+        fs::copy(&working_file, &replayed).unwrap();
+        assert!(load_snapshot(&other_state, &replayed).is_err());
+        let mut altered_snapshot = serde_json::to_value(&signed_snapshot).unwrap();
+        altered_snapshot["snapshot"]["files"][0]["path"] = serde_json::json!([2]);
+        fs::write(
+            &working_file,
+            serde_json::to_vec(&altered_snapshot).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            load_snapshot(&root, &working_file)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("authentication failed")
+        );
+        fs::write(
+            &working_file,
+            serde_json::to_vec(&signed_snapshot.snapshot).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            load_snapshot(&root, &working_file)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("unsigned legacy remote snapshot")
+        );
+        fs::remove_dir_all(other_state).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 }

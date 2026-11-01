@@ -1,4 +1,6 @@
 use crate::filters::FileFilters;
+use crate::receipts::{hex, unhex};
+use crate::recovery;
 use crate::{AppResult, state_directory};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -14,6 +16,16 @@ pub struct Profile {
     receipt_directory: Option<Vec<u16>>,
     #[serde(default)]
     filters: FileFilters,
+}
+
+const PROFILE_DOMAIN: &[u8] = b"zero-saved-profile-v3\0";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SignedProfile {
+    version: u8,
+    profile: Profile,
+    signature: String,
 }
 
 pub struct LoadedProfile {
@@ -72,23 +84,53 @@ pub fn create(
             return Err("selected path is too long".into());
         }
     }
+    let signature =
+        recovery::sign_scoped(PROFILE_DOMAIN, &state, name, &serde_json::to_vec(&profile)?)?;
+    let signed = SignedProfile {
+        version: 3,
+        profile,
+        signature: hex(&signature),
+    };
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&path)?;
-    serde_json::to_writer_pretty(&mut file, &profile)?;
+    serde_json::to_writer_pretty(&mut file, &signed)?;
     file.write_all(b"\n")?;
     file.sync_all()?;
     Ok(path)
 }
 
 pub fn load(name: &str) -> AppResult<LoadedProfile> {
-    let path = profile_path(&state_directory()?, name)?;
+    let state = state_directory()?;
+    let path = profile_path(&state, name)?;
+    read_profile(&path, &state, name)
+}
+
+fn read_profile(path: &Path, state: &Path, name: &str) -> AppResult<LoadedProfile> {
     let file = fs::File::open(path)?;
     if file.metadata()?.len() > 1024 * 1024 {
         return Err("profile is too large".into());
     }
-    let profile: Profile = serde_json::from_reader(file)?;
+    let record: serde_json::Value = serde_json::from_reader(file)?;
+    if matches!(
+        record.get("version").and_then(serde_json::Value::as_u64),
+        Some(1 | 2)
+    ) {
+        return Err("unsigned legacy profile requires operator review and re-creation".into());
+    }
+    let signed: SignedProfile = serde_json::from_value(record)?;
+    if signed.version != 3 {
+        return Err("profile format is unsupported".into());
+    }
+    recovery::verify_scoped(
+        PROFILE_DOMAIN,
+        state,
+        name,
+        &serde_json::to_vec(&signed.profile)?,
+        &unhex::<64>(&signed.signature)?,
+    )?;
+    let profile = signed.profile;
     if !(1..=2).contains(&profile.version)
         || profile.paths.is_empty()
         || profile.paths.len() > 32
@@ -192,5 +234,62 @@ mod tests {
         let profile: Profile = serde_json::from_str(legacy).unwrap();
         assert_eq!(profile.version, 1);
         assert_eq!(profile.filters, FileFilters::default());
+    }
+
+    #[test]
+    fn saved_profiles_require_current_user_signature() {
+        let root = crate::tests::test_root("profile-auth");
+        fs::create_dir(root.join("profiles")).unwrap();
+        let path = root.join("profiles").join("benign.json");
+        let selected = root.join("selected");
+        let profile = Profile {
+            version: 2,
+            paths: vec![selected.as_os_str().encode_wide().collect()],
+            receipt_directory: None,
+            filters: FileFilters::default(),
+        };
+        let signed = SignedProfile {
+            version: 3,
+            signature: hex(&recovery::sign_scoped(
+                PROFILE_DOMAIN,
+                &root,
+                "benign",
+                &serde_json::to_vec(&profile).unwrap(),
+            )
+            .unwrap()),
+            profile,
+        };
+        fs::write(&path, serde_json::to_vec(&signed).unwrap()).unwrap();
+        assert_eq!(
+            read_profile(&path, &root, "benign").unwrap().paths,
+            [selected]
+        );
+        assert!(read_profile(&path, &root, "other").is_err());
+        let other_state = crate::tests::test_root("profile-replay");
+        let replayed = other_state.join("benign.json");
+        fs::copy(&path, &replayed).unwrap();
+        assert!(read_profile(&replayed, &other_state, "benign").is_err());
+        fs::remove_dir_all(other_state).unwrap();
+
+        let mut altered = serde_json::to_value(&signed).unwrap();
+        altered["profile"]["paths"] = serde_json::json!([[67, 58, 92, 111, 116, 104, 101, 114]]);
+        fs::write(&path, serde_json::to_vec(&altered).unwrap()).unwrap();
+        assert!(
+            read_profile(&path, &root, "benign")
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("authentication failed")
+        );
+
+        fs::write(&path, serde_json::to_vec(&signed.profile).unwrap()).unwrap();
+        assert!(
+            read_profile(&path, &root, "benign")
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("unsigned legacy profile")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

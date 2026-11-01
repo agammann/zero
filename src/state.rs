@@ -122,7 +122,7 @@ pub fn directory() -> AppResult<PathBuf> {
     Err("state directory is not initialized".into())
 }
 
-fn directory_identity(path: &Path) -> AppResult<FileIdentity> {
+pub(crate) fn directory_identity(path: &Path) -> AppResult<FileIdentity> {
     let file = OpenOptions::new()
         .read(true)
         .access_mode(0)
