@@ -481,6 +481,8 @@ pub fn poll_once() -> AppResult<usize> {
         Err(error) => return Err(error.into()),
     };
     let config = load_config(&state)?;
+    // A remote result must be signable before processing any selected file.
+    let _ = signing_key(&state)?;
     let queue = PathBuf::from(OsString::from_wide(&config.queue));
     let pending = queue.join(&config.device_id).join("pending");
     let results = queue.join(&config.device_id).join("results");

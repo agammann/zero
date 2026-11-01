@@ -33,6 +33,9 @@ try {
     $sibling=Join-Path $root 'keep.txt'; [IO.File]::WriteAllText($sibling,'unselected sentinel')
     $sentinel=Get-ZeroHash $sibling
     $selected=Join-Path $files 'selected.bin'; [IO.File]::WriteAllBytes($selected,(New-Object byte[] 2097197))
+    $null=Run @('--receipts',$receipts,$selected) $state 1
+    Check ((Test-Path -LiteralPath $selected) -and (Get-ZeroHash $sibling) -eq $sentinel) 'missing signing credential stops before selected file changes'
+    $null=Run @('--init-signing-key')
     $null=Run @('--receipts',$receipts,$selected)
     Check (!(Test-Path -LiteralPath $selected) -and (Get-ZeroHash $sibling) -eq $sentinel) 'selected file removed and sibling preserved'
     $public=Join-Path $root 'trusted-public.hex'; $null=Run @('--export-key',$public)
