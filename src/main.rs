@@ -5,6 +5,7 @@ compile_error!("Zero currently supports Windows only.");
 mod filters;
 mod profiles;
 mod receipts;
+mod recovery;
 mod remote;
 mod scheduler;
 mod state;
@@ -720,6 +721,14 @@ struct PendingOperation {
     stage_identity: FileIdentity,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SignedPendingOperation {
+    version: u8,
+    operation: PendingOperation,
+    signature: String,
+}
+
 struct PendingJournal {
     path: PathBuf,
 }
@@ -740,7 +749,12 @@ impl PendingJournal {
             stage: stage.as_os_str().encode_wide().collect(),
             stage_identity: file_identity(stage_file)?,
         };
-        let encoded = serde_json::to_vec(&operation)?;
+        let signature = recovery::sign(&serde_json::to_vec(&operation)?)?;
+        let encoded = serde_json::to_vec(&SignedPendingOperation {
+            version: 2,
+            operation,
+            signature: receipts::hex(&signature),
+        })?;
         for _ in 0..8 {
             let mut id = [0u8; 16];
             getrandom::fill(&mut id)?;
@@ -793,7 +807,21 @@ fn recover_pending_jobs(state_dir: &Path) -> AppResult<()> {
         if record_file.metadata()?.len() > 64 * 1024 {
             return Err(format!("recovery record is too large: {}", record_path.display()).into());
         }
-        let operation: PendingOperation = serde_json::from_reader(record_file)?;
+        let record: serde_json::Value = serde_json::from_reader(record_file)?;
+        if record.get("version").and_then(serde_json::Value::as_u64) == Some(1) {
+            return Err(
+                "legacy recovery record requires manual review; automatic recovery refused".into(),
+            );
+        }
+        let envelope: SignedPendingOperation = serde_json::from_value(record)?;
+        if envelope.version != 2 {
+            return Err("recovery record has an unsupported format".into());
+        }
+        recovery::verify(
+            &serde_json::to_vec(&envelope.operation)?,
+            &receipts::unhex::<64>(&envelope.signature)?,
+        )?;
+        let operation = envelope.operation;
         if operation.version != 1 || operation.source.is_empty() || operation.stage.is_empty() {
             return Err("recovery record has an unsupported format".into());
         }
@@ -1647,6 +1675,73 @@ mod tests {
         assert_eq!(fs::read(&source).unwrap(), b"replacement must remain");
         assert_eq!(fs::read(&stage_path).unwrap(), b"encrypted fixture");
         assert_eq!(fs::read(&journal.path).unwrap(), record);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn automatic_recovery_refuses_unsigned_legacy_record() {
+        let root = test_root("unsigned-recovery");
+        let state = root.join("state");
+        let source = root.join("outside-profile.txt");
+        let stage = root.join("absent-stage.tmp");
+        fs::create_dir(&state).unwrap();
+        fs::write(&source, b"keep this unselected file").unwrap();
+        let file = open_for_destroy(&source).unwrap();
+        let operation = PendingOperation {
+            version: 1,
+            source: source.as_os_str().encode_wide().collect(),
+            source_identity: file_identity(&file).unwrap(),
+            stage: stage.as_os_str().encode_wide().collect(),
+            stage_identity: file_identity(&file).unwrap(),
+        };
+        drop(file);
+        let record = state.join("pending-forged.json");
+        fs::write(&record, serde_json::to_vec(&operation).unwrap()).unwrap();
+        assert!(
+            recover_pending_jobs(&state)
+                .unwrap_err()
+                .to_string()
+                .contains("legacy recovery record")
+        );
+        assert_eq!(fs::read(&source).unwrap(), b"keep this unselected file");
+        assert!(record.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn automatic_recovery_refuses_tampered_signed_record() {
+        let root = test_root("tampered-recovery");
+        let state = root.join("state");
+        let source = root.join("selected.bin");
+        let stage = root.join("stage.tmp");
+        fs::write(&source, b"keep this file").unwrap();
+        fs::write(&stage, b"keep this stage").unwrap();
+        let source_file = open_for_destroy(&source).unwrap();
+        let stage_file = open_for_destroy(&stage).unwrap();
+        let journal =
+            PendingJournal::create(&source, &source_file, &stage, &stage_file, &state).unwrap();
+        drop(source_file);
+        drop(stage_file);
+        let mut envelope: SignedPendingOperation =
+            serde_json::from_slice(&fs::read(&journal.path).unwrap()).unwrap();
+        envelope.signature.replace_range(
+            0..1,
+            if envelope.signature.starts_with('0') {
+                "1"
+            } else {
+                "0"
+            },
+        );
+        fs::write(&journal.path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        assert!(
+            recover_pending_jobs(&state)
+                .unwrap_err()
+                .to_string()
+                .contains("authentication failed")
+        );
+        assert_eq!(fs::read(&source).unwrap(), b"keep this file");
+        assert_eq!(fs::read(&stage).unwrap(), b"keep this stage");
+        assert!(journal.path.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
