@@ -101,7 +101,10 @@ pub(crate) fn run(root: &Path, mode: &str) {
             )
             .unwrap();
             remote::account_fixture::create(&state, &selected);
-            assert_eq!(profiles::load("benign").unwrap().paths, [selected.clone()]);
+            assert_eq!(
+                profiles::load("benign").unwrap().paths.as_slice(),
+                std::slice::from_ref(&selected)
+            );
             remote::account_fixture::assert_load(&state, &selected, None);
             if mode == "state-other-key" {
                 let owner_public =
@@ -178,7 +181,10 @@ pub(crate) fn run(root: &Path, mode: &str) {
             );
         }
         "state-owner" => {
-            assert_eq!(profiles::load("benign").unwrap().paths, [selected.clone()]);
+            assert_eq!(
+                profiles::load("benign").unwrap().paths.as_slice(),
+                std::slice::from_ref(&selected)
+            );
             remote::account_fixture::assert_load(&state, &selected, None);
             let trusted = fs::read_to_string(state.join("receipt-public-key.hex")).unwrap();
             assert_eq!(
