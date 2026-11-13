@@ -120,6 +120,9 @@ try {
                 [IO.Path]::GetFileName($resolved) -notlike 'zero-recovery-accounts-*') {
                 throw 'Refusing cleanup outside the exact generated runner fixture root.'
             }
+            if ((Get-Item -LiteralPath $resolved -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw 'Refusing cleanup through a reparse point at the fixture root.'
+            }
             if (@(Get-ChildItem -LiteralPath $resolved -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) {
                 throw 'Refusing recursive cleanup through a reparse point.'
             }
