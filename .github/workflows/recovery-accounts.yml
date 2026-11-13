@@ -31,6 +31,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Rust formatting failed.' }
           cargo clippy --locked --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw 'Clippy failed.' }
+          cargo build --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Product build failed.' }
           $messages = cargo test --locked --no-run --message-format=json
           if ($LASTEXITCODE -ne 0) { throw 'Fixture build failed.' }
           $artifacts = @($messages | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.executable })
@@ -40,4 +42,4 @@ jobs:
         shell: pwsh
         env:
           ZERO_TEST_EXECUTABLE: ${{ steps.build.outputs.executable }}
-        run: ./scripts/verify-recovery-accounts.ps1 -TestExecutable $env:ZERO_TEST_EXECUTABLE
+        run: ./scripts/verify-recovery-accounts.ps1 -TestExecutable $env:ZERO_TEST_EXECUTABLE -ProductExecutable ./target/debug/zero.exe

@@ -17,6 +17,7 @@ if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
 $env:ZERO_ACCOUNT_FIXTURE = $Fixture
 $env:ZERO_ACCOUNT_MODE = $Mode
 $env:ZERO_ACCOUNT_EXPECTED_SID = $ExpectedSid
+$env:ZERO_ACCOUNT_PRODUCT = Join-Path (Split-Path -Parent $TestExecutable) 'fixture-product.exe'
 # The product crate uses the Windows GUI subsystem, including its test binary.
 # Windows PowerShell's call operator does not reliably wait/set LASTEXITCODE for it.
 $process = [Diagnostics.Process]::new()
