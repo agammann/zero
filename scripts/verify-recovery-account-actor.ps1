@@ -17,5 +17,26 @@ if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
 $env:ZERO_ACCOUNT_FIXTURE = $Fixture
 $env:ZERO_ACCOUNT_MODE = $Mode
 $env:ZERO_ACCOUNT_EXPECTED_SID = $ExpectedSid
-& $TestExecutable --ignored --exact recovery_account_tests::recovery_cross_account_driver --nocapture
-if ($LASTEXITCODE -ne 0) { throw "Account fixture mode $Mode failed: $LASTEXITCODE" }
+# The product crate uses the Windows GUI subsystem, including its test binary.
+# Windows PowerShell's call operator does not reliably wait/set LASTEXITCODE for it.
+$process = [Diagnostics.Process]::new()
+$process.StartInfo = [Diagnostics.ProcessStartInfo]::new()
+$process.StartInfo.FileName = $TestExecutable
+$process.StartInfo.Arguments = '--ignored --exact recovery_account_tests::recovery_cross_account_driver --nocapture'
+$process.StartInfo.UseShellExecute = $false
+$process.StartInfo.CreateNoWindow = $true
+$process.StartInfo.RedirectStandardOutput = $true
+$process.StartInfo.RedirectStandardError = $true
+try {
+    if (-not $process.Start()) { throw 'Could not start the exact fixture executable.' }
+    $stdout = $process.StandardOutput.ReadToEndAsync()
+    $stderr = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit(60000)) {
+        $process.Kill()
+        $process.WaitForExit()
+        throw "Account fixture mode $Mode timed out."
+    }
+    [Console]::Out.Write($stdout.GetAwaiter().GetResult())
+    [Console]::Error.Write($stderr.GetAwaiter().GetResult())
+    if ($process.ExitCode -ne 0) { throw "Account fixture mode $Mode failed: $($process.ExitCode)" }
+} finally { $process.Dispose() }
