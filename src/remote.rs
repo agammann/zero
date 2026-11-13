@@ -19,6 +19,9 @@ const RESULT_DOMAIN: &[u8] = b"zero-remote-result-v1\0";
 const CONFIG_DOMAIN: &[u8] = b"zero-remote-config-v2\0";
 const SNAPSHOT_DOMAIN: &[u8] = b"zero-remote-snapshot-v3\0";
 
+#[cfg(test)]
+pub(crate) mod account_fixture;
+
 #[derive(Clone, Deserialize, Serialize)]
 struct DeviceConfig {
     version: u8,

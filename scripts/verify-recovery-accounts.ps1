@@ -1,4 +1,7 @@
-param([Parameter(Mandatory)][string]$TestExecutable)
+param(
+    [Parameter(Mandatory)][string]$TestExecutable,
+    [Parameter(Mandatory)][string]$ProductExecutable
+)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -59,9 +62,19 @@ function Get-FixtureSnapshot {
     }) | ConvertTo-Json -Compress)
 }
 
+function Get-AuthoritySnapshot {
+    $owner = Join-Path $fixture 'authority/owner'
+    $files = @(Get-ChildItem -LiteralPath $owner -File -Recurse | Where-Object Name -ne 'last-error.txt' | Sort-Object FullName)
+    if ($files.Count -ne 6) { throw 'Expected six protected owner files.' }
+    return (($files | ForEach-Object {
+        [ordered]@{path=$_.FullName; length=$_.Length; sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash}
+    }) | ConvertTo-Json -Compress)
+}
+
 try {
     New-Item -ItemType Directory -Path $fixture | Out-Null
     Copy-Item -LiteralPath (Resolve-Path -LiteralPath $TestExecutable).Path -Destination (Join-Path $runRoot 'fixture-tests.exe')
+    Copy-Item -LiteralPath (Resolve-Path -LiteralPath $ProductExecutable).Path -Destination (Join-Path $runRoot 'fixture-product.exe')
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'verify-recovery-account-actor.ps1') -Destination (Join-Path $runRoot 'actor.ps1')
     $usersGroup = (Get-LocalGroup -SID 'S-1-5-32-545').Name
     foreach ($role in @('a','b')) {
@@ -80,16 +93,27 @@ try {
     }
     if ($accounts[0].Sid -eq $accounts[1].Sid) { throw 'Test accounts must have distinct SIDs.' }
     Invoke-AccountFixture $accounts[0] 'create'
+    Invoke-AccountFixture $accounts[0] 'state-create'
     $before = Get-FixtureSnapshot
+    $authorityBefore = Get-AuthoritySnapshot
     Invoke-AccountFixture $accounts[1] 'reject-missing'
     if ((Get-FixtureSnapshot) -cne $before) { throw 'Missing-credential refusal changed a fixture or record.' }
+    Invoke-AccountFixture $accounts[1] 'state-reject-missing'
+    if ((Get-AuthoritySnapshot) -cne $authorityBefore) { throw 'Missing-credential refusal changed owner state or selected files.' }
     Invoke-AccountFixture $accounts[1] 'seed-own-key'
+    Invoke-AccountFixture $accounts[1] 'state-other-key'
     Invoke-AccountFixture $accounts[1] 'reject-foreign'
     if ((Get-FixtureSnapshot) -cne $before) { throw 'Foreign-credential refusal changed a fixture or record.' }
+    Invoke-AccountFixture $accounts[1] 'state-reject-foreign'
+    if ((Get-AuthoritySnapshot) -cne $authorityBefore) { throw 'Foreign-credential refusal changed owner state or selected files.' }
     Invoke-AccountFixture $accounts[0] 'recover'
-    if (($evidence | Select-Object -ExpandProperty pid -Unique).Count -ne 5) { throw 'Each test phase must run in a separate process.' }
-    if (@(Get-ChildItem -LiteralPath $fixture -File -Recurse).Count -ne 0) { throw 'Owner recovery did not remove all three synthetic files.' }
+    if (Test-Path -LiteralPath (Join-Path $fixture 'selected.bin')) { throw 'Owner recovery left the selected file.' }
+    if (Test-Path -LiteralPath (Join-Path $fixture 'encrypted-stage.tmp')) { throw 'Owner recovery left the staged file.' }
+    if (@(Get-ChildItem -LiteralPath (Join-Path $fixture 'state') -File).Count -ne 0) { throw 'Owner recovery left its pending record.' }
+    Invoke-AccountFixture $accounts[0] 'state-owner'
+    if (($evidence | Select-Object -ExpandProperty pid -Unique).Count -ne 10) { throw 'Each test phase must run in a separate process.' }
     Write-Host 'PASS: distinct unprivileged SIDs, real modify access, both authentication refusals preserve bytes/identities, and separate-process owner recovery succeeds.'
+    Write-Host 'PASS: profile/enrollment/snapshot account isolation, actual receipt-backed CLI refusals, independent receipt/result keys, and owner credential reuse.'
     $evidence | ConvertTo-Json -Depth 4 | Write-Host
 } finally {
     if ($null -ne $activeProcess -and -not $activeProcess.HasExited) {

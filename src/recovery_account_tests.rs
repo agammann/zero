@@ -29,6 +29,7 @@ fn recovery_cross_account_driver() {
     let source = root.join("selected.bin");
     let stage = root.join("encrypted-stage.tmp");
     match mode.as_str() {
+        mode if mode.starts_with("state-") => state_account_tests::run(&root, mode),
         "create" => {
             assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
             fs::write(&source, b"original synthetic plaintext").unwrap();
