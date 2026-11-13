@@ -515,15 +515,12 @@ mod tests {
 
     #[test]
     fn old_signed_results_still_verify() {
-        let key = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
         let old_body = r#"{"version":1,"device_id":"target","profile":"clean","nonce":"job","files_completed":2,"files_missing":0,"completed_unix_seconds":42}"#;
-        let mut signed_bytes = RESULT_DOMAIN.to_vec();
-        signed_bytes.extend_from_slice(old_body.as_bytes());
-        let signature = key.sign(&signed_bytes);
+        // Fixture generated using ed25519-dalek 2.2.0 and the synthetic seed [23; 32].
         let result = SignedResult {
             body: serde_json::from_str(old_body).unwrap(),
-            public_key: hex(&key.verifying_key().to_bytes()),
-            signature: hex(&signature.to_bytes()),
+            public_key: "31debe55d37c722768b137131caa6087080b2e0b60b94bd785d14575cfa498bc".to_owned(),
+            signature: "953fb5c10510244506e7210e2e1f38997e9c7d333f413ef53ed9c442af0155d03895c4722af1c15c9e39ddc328886c3ed86bcb9d608e5b3b3ad7190998242f06".to_owned(),
         };
         assert_eq!(result.body.files_skipped_filter, 0);
         verify_signed_result(&result, &result.public_key).unwrap();
