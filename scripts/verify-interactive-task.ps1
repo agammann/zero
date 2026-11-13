@@ -114,11 +114,14 @@ try {
     [xml]$xml = $xmlText
     $principal = $xml.Task.Principals.Principal
     $action = $xml.Task.Actions.Exec
-    Check (@($xml.Task.Principals.Principal).Count -eq 1 -and $principal.UserId -eq $sid -and $principal.LogonType -eq 'InteractiveToken' -and $principal.RunLevel -eq 'LeastPrivilege') 'Registered principal is this SID with InteractiveToken and LeastPrivilege'
+    # Export-ScheduledTask can omit the default RunLevel; validate its effective CIM value too.
+    $runLevelNode = $principal.SelectSingleNode('*[local-name()="RunLevel"]')
+    $xmlRunLevel = if ($runLevelNode) { $runLevelNode.InnerText } else { '(default)' }
+    Check (@($xml.Task.Principals.Principal).Count -eq 1 -and $principal.UserId -eq $sid -and $principal.LogonType -eq 'InteractiveToken' -and $xmlRunLevel -in @('(default)','LeastPrivilege') -and $task.Principal.RunLevel -eq 'Limited') 'Registered principal is this SID with InteractiveToken and LeastPrivilege'
     Check (@($xml.Task.Actions.Exec).Count -eq 1 -and $action.Command -eq $exe) 'Registered action executes the unchanged Zero binary'
     $arguments = [ZeroInteractiveNative]::Arguments($action.Arguments)
     Check ($arguments.Count -eq 7 -and $arguments[0] -eq '--quiet' -and $arguments[1] -eq '--state-dir' -and $arguments[2] -eq $state -and $arguments[3] -eq '--state-id' -and $arguments[4] -match '^[0-9a-f]{8}:[0-9a-f]{16}:[0-9a-f]{16}$' -and $arguments[5] -eq '--profile' -and $arguments[6] -eq $profile) 'Registered action retains exact isolated state and profile arguments'
-    $report.task = @{name=$task.TaskName;path=$task.TaskPath;principalSid=$principal.UserId;logonType=$principal.LogonType;runLevel=$principal.RunLevel;command=$action.Command;arguments=$arguments}
+    $report.task = @{name=$task.TaskName;path=$task.TaskPath;principalSid=$principal.UserId;logonType=$principal.LogonType;xmlRunLevel=$xmlRunLevel;effectiveRunLevel=[string]$task.Principal.RunLevel;command=$action.Command;arguments=$arguments}
     Check (Test-Path -LiteralPath $selected) 'Registration alone did not process the selected file'
     $prior = Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath $task.TaskPath
     Start-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath
