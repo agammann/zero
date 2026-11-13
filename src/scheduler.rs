@@ -53,7 +53,7 @@ unsafe extern "system" {
     fn ConvertSidToStringSidW(sid: *mut c_void, text: *mut *mut u16) -> i32;
 }
 
-fn current_sid() -> AppResult<String> {
+pub(crate) fn current_sid() -> AppResult<String> {
     let mut token = std::ptr::null_mut();
     if unsafe { OpenProcessToken(GetCurrentProcess(), 0x0008, &mut token) } == 0 {
         return Err(std::io::Error::last_os_error().into());

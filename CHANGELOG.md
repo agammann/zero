@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Sign new pending recovery records with a key held in the current Windows user's Credential Manager. Automatic recovery refuses older unsigned records and leaves them intact for manual review.
+
 ## 1.0.1
 
 - Read release artifacts through one verified file descriptor, with a 64 MiB bound and checks for path replacement or mutation while reading.

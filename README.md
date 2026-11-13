@@ -60,7 +60,7 @@ Scheduling uses Windows Task Scheduler under the current user. Stay signed in to
 
 `--state-dir` requires version 0.6.2 or newer. Version 0.6.1 does not support it; do not pass this option to that version.
 
-Use the leading `--state-dir` option to choose an absolute directory for profiles, signing keys, recovery records, remote enrollment and job history. Put it after `--quiet`, if used, and before the command. Use the same location for subsequent commands:
+Use the leading `--state-dir` option to choose an absolute directory for profiles, receipt and remote signing keys, recovery records, remote enrollment and job history. The recovery-record signing key is held separately in the current Windows user's Credential Manager. Put `--state-dir` after `--quiet`, if used, and before the command. Use the same location for subsequent commands:
 
 ```powershell
 .\Zero.exe --state-dir "D:\Zero State" --create-profile DownloadsClean "D:\Drop Folder"
@@ -147,6 +147,10 @@ Extract a new Windows release into a separate directory. Do not delete or replac
 Existing scheduled tasks point to their original executable. Unschedule them using the original executable and the same default or explicit state option, then schedule again using the new executable after checking its preview. Keep the executable in that stable path. For an agent, use `--remove-agent` with its original state, then enroll the new executable with the same trusted controller key and selected profiles. Keep queue and completed-job records; removing them weakens replay protection.
 
 A failed scheduled job is visible in Task Scheduler's Last Run Result and normally in the selected state's `last-error.txt`. A mismatched bound state refuses access without writing into the replacement directory. Stop the affected exact task in Task Scheduler before investigating. Never redirect an old task at a new empty state store merely to clear an error. Corrupt profiles or recovery records remain available for inspection. Processing commands attempt to finish an interrupted exact file identity; they cannot recover the original plaintext. Read [the recovery sequence](STORAGE_AND_KEY_MODEL.md) before retrying.
+
+Builds with signed recovery records keep their signing key in the current Windows user's Credential Manager, outside the chosen state directory. The same Windows account can verify the record on a later scheduled run. If Credential Manager is unavailable or its key is lost, automatic recovery stops and leaves the record and file for manual review.
+
+These builds also leave an older unsigned `pending-*.json` record untouched and stop automatic recovery. If this happens during an upgrade, stop the affected tasks and inspect the record before any retry. To finish a verified, intentionally selected file, copy only that record to a new state directory writable only by your Windows account, create a profile for an empty disposable folder there with the older Zero executable that wrote the record, and run that empty profile with the same private state directory. The older executable will attempt recovery before processing the empty profile. Confirm that the intended file is gone and the copied record was removed; only then archive the original unsigned record and resume the upgraded task. If the record's source is unfamiliar or the file must be preserved, leave the record and file untouched for manual review. Do not run the older executable against a state directory other users can write.
 
 ### Scheduler verification: 2026-10-02
 
