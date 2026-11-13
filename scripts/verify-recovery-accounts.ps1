@@ -41,9 +41,10 @@ function Invoke-AccountFixture($Account, [string]$Mode) {
     Write-Host $output
     Write-Host (Get-Content -LiteralPath $stderr -Raw)
     if ($code -ne 0) { throw "Account fixture $Mode exited $code." }
-    $match = [regex]::Match($output, '(?m)^ZERO_ACCOUNT_EVIDENCE=(\{[^\r\n]+\})\r?$')
-    if (-not $match.Success) { throw "Account fixture $Mode produced no success evidence." }
-    $result = $match.Groups[1].Value | ConvertFrom-Json
+    # libtest may print its test-name prefix before the first captured line.
+    $matches = [regex]::Matches($output, 'ZERO_ACCOUNT_EVIDENCE=(\{[^\r\n]+\})')
+    if ($matches.Count -ne 1) { throw "Account fixture $Mode must produce exactly one success record." }
+    $result = $matches[0].Groups[1].Value | ConvertFrom-Json
     if ($result.sid -ne $Account.Sid -or $result.mode -ne $Mode) { throw 'Actor identity/mode mismatch.' }
     $evidence.Add($result)
 }
@@ -70,7 +71,7 @@ try {
         $user = New-LocalUser -Name $name -Password $password -Description 'Disposable Zero CI recovery fixture'
         $account = [pscustomobject]@{Name=$name; Sid=$user.SID.Value; Credential=[PSCredential]::new("$env:COMPUTERNAME\$name", $password)}
         $accounts.Add($account)
-        Add-LocalGroupMember -Group $usersGroup -Member $user.SID
+        Add-LocalGroupMember -Group $usersGroup -Member $user
         # Executable and actor script are read-only to actors; only generated fixtures are writable.
         & icacls.exe $runRoot /grant ('*' + $account.Sid + ':(OI)(CI)RX') | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Cannot grant fixture traversal/read access.' }
