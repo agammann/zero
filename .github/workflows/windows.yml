@@ -3,7 +3,7 @@ name: Windows build and tests
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, test/security-stack-integration-nov13]
 
 permissions:
   contents: read
