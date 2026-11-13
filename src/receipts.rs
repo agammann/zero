@@ -284,11 +284,11 @@ mod tests {
         let body: ReceiptBody = serde_json::from_str(old_body).unwrap();
         assert!(body.storage.is_none());
         assert_eq!(serde_json::to_string(&body).unwrap(), old_body);
-        let key = SigningKey::from_bytes(&[31u8; 32]);
+        // Fixture generated using ed25519-dalek 2.2.0 and the synthetic seed [31; 32].
         let record = SignedReceipt {
             body,
-            public_key: hex(&key.verifying_key().to_bytes()),
-            signature: hex(&key.sign(old_body.as_bytes()).to_bytes()),
+            public_key: "43046bfe4092b3e94994eada15dcc20d8aaa07b658fd3954eb8e0efb8bdca5de".to_owned(),
+            signature: "a79a397c168aad9eed59b9eb45ab6dab9578071e7dcba0943e46c09306c296064c01afdec9a4318778ee71359f853ad3fc4134b5e8fda7169982310f7e42d70d".to_owned(),
         };
         let mut random = [0u8; 8];
         getrandom::fill(&mut random).unwrap();
