@@ -5,7 +5,10 @@ use super::*;
 #[ignore = "requires scripts/verify-recovery-accounts.ps1 on a disposable GitHub-hosted runner"]
 fn recovery_cross_account_driver() {
     assert_eq!(env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
-    assert_eq!(env::var("RUNNER_ENVIRONMENT").as_deref(), Ok("github-hosted"));
+    assert_eq!(
+        env::var("RUNNER_ENVIRONMENT").as_deref(),
+        Ok("github-hosted")
+    );
     let root = fs::canonicalize(env::var_os("ZERO_ACCOUNT_FIXTURE").unwrap()).unwrap();
     let runner_temp = fs::canonicalize(env::var_os("RUNNER_TEMP").unwrap()).unwrap();
     assert!(root.starts_with(runner_temp));
