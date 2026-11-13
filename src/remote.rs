@@ -514,6 +514,33 @@ mod tests {
     }
 
     #[test]
+    fn old_signed_commands_still_verify() {
+        // Fixture generated using ed25519-dalek 2.2.0 and the synthetic seed [19; 32].
+        let public_key = "66cd608b928b88e50e0efeaa33faf1c43cefe07294b0b87e9fe0aba6a3cf7633";
+        let config = DeviceConfig {
+            version: 1,
+            device_id: "laptop_1".to_owned(),
+            queue: vec![1],
+            controller_public_key: public_key.to_owned(),
+            allowed_profiles: vec!["private".to_owned()],
+        };
+        let mut command = SignedCommand {
+            body: CommandBody {
+                version: 1,
+                device_id: "laptop_1".to_owned(),
+                profile: "private".to_owned(),
+                nonce: "aa".repeat(16),
+                issued_unix_seconds: 1,
+            },
+            public_key: public_key.to_owned(),
+            signature: "038d4e9723e8fcdf07d7408cb7ef90e11177a79a87166042884d87e61755418702969b6bdd05bb23c16a07f24cd07989eceb13e9bfd341a2f159613cfd2e1103".to_owned(),
+        };
+        verify_command(&command, &config).unwrap();
+        command.body.nonce = "bb".repeat(16);
+        assert!(verify_command(&command, &config).is_err());
+    }
+
+    #[test]
     fn old_signed_results_still_verify() {
         let old_body = r#"{"version":1,"device_id":"target","profile":"clean","nonce":"job","files_completed":2,"files_missing":0,"completed_unix_seconds":42}"#;
         // Fixture generated using ed25519-dalek 2.2.0 and the synthetic seed [23; 32].
