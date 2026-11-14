@@ -2,7 +2,7 @@
 
 This document describes version 1.0.1's implemented file-level sequence, which is unchanged from 1.0.0. It is not a certification that every historical copy is gone.
 
-State paths below use the default `%LOCALAPPDATA%\Zero`; a leading `--state-dir` instead selects one explicit store for profiles, receipt and remote keys, recovery and remote-job records. The recovery-record signing key is held separately in the current Windows user's Credential Manager. Newly registered tasks retain and check the state directory's Windows identity before state access. No records or keys are automatically migrated. This does not establish that other saved paths resolve identically across Windows filesystem views.
+State paths below use the default `%LOCALAPPDATA%\Zero`; a leading `--state-dir` instead selects one explicit store for profiles, receipt and remote keys, recovery and remote-job records. The state-record signing key for pending recovery, saved profiles, remote enrollment, and remote working snapshots is held separately in the current Windows user's Credential Manager. Newly registered tasks retain and check the state directory's Windows identity before state access. Older unsigned records are not automatically migrated. This does not establish that other saved paths resolve identically across Windows filesystem views.
 
 ## Per-file sequence
 
