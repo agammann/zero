@@ -10,6 +10,21 @@ use std::sync::OnceLock;
 
 static STATE: OnceLock<State> = OnceLock::new();
 
+#[cfg(test)]
+thread_local! {
+    static TEST_DIRECTORY: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_directory(path: Option<PathBuf>) {
+    TEST_DIRECTORY.with(|directory| *directory.borrow_mut() = path);
+}
+
+#[cfg(test)]
+pub(crate) fn test_directory_is_set() -> bool {
+    TEST_DIRECTORY.with(|directory| directory.borrow().is_some())
+}
+
 struct State {
     directory: PathBuf,
     expected: Option<FileIdentity>,
@@ -112,6 +127,10 @@ pub fn initialize(args: &mut Peekable<impl Iterator<Item = OsString>>) -> AppRes
 }
 
 pub fn directory() -> AppResult<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_DIRECTORY.with(|directory| directory.borrow().clone()) {
+        return Ok(path);
+    }
     if let Some(state) = STATE.get() {
         return state.checked_directory();
     }
