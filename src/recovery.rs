@@ -16,6 +16,33 @@ const ERROR_NOT_FOUND: i32 = 1168;
 const WAIT_OBJECT_0: u32 = 0;
 const WAIT_ABANDONED: u32 = 0x80;
 
+// Only the current unit-test thread can opt into ephemeral signing keys. This
+// avoids touching the operator's Credential Manager during loopback tests.
+#[cfg(test)]
+thread_local! {
+    static TEST_KEYS: std::cell::RefCell<Option<(SigningKey, SigningKey)>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_keys(keys: Option<(SigningKey, SigningKey)>) {
+    TEST_KEYS.with(|current| *current.borrow_mut() = keys);
+}
+
+#[cfg(test)]
+fn test_key(target: &str) -> Option<AppResult<Option<SigningKey>>> {
+    TEST_KEYS.with(|current| {
+        let keys = current.borrow();
+        let (state, result) = keys.as_ref()?;
+        Some(match target {
+            RECOVERY_TARGET => Ok(Some(state.clone())),
+            target if target.starts_with("Zero/receipt-result-signing-key/v1/") => {
+                Ok(Some(result.clone()))
+            }
+            _ => Err("unexpected loopback credential target".into()),
+        })
+    })
+}
+
 #[repr(C)]
 struct Credential {
     flags: u32,
@@ -85,6 +112,10 @@ fn target_name(target: &str) -> Vec<u16> {
 }
 
 fn read_key(target: &str) -> AppResult<Option<SigningKey>> {
+    #[cfg(test)]
+    if let Some(key) = test_key(target) {
+        return key;
+    }
     let mut value = ptr::null_mut();
     let wide_target = target_name(target);
     let ok = unsafe { CredReadW(wide_target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut value) };
@@ -118,6 +149,10 @@ fn read_key(target: &str) -> AppResult<Option<SigningKey>> {
 }
 
 fn create_key(target: &str) -> AppResult<SigningKey> {
+    #[cfg(test)]
+    if let Some(key) = test_key(target) {
+        return key?.ok_or_else(|| "loopback credential unavailable".into());
+    }
     let _lock = CredentialLock::acquire()?;
     if let Some(key) = read_key(target)? {
         return Ok(key);
