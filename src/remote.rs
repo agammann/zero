@@ -405,6 +405,12 @@ fn process_snapshot(snapshot: &Snapshot) -> AppResult<(usize, usize, usize, Stor
             missing += 1;
             continue;
         }
+        // The loopback test never permits the real destructive file operation,
+        // even if an unexpected file appears at its synthetic missing path.
+        #[cfg(test)]
+        if crate::state::test_directory_is_set() {
+            return Err("loopback fixture refuses selected file processing".into());
+        }
         let bytes = process_one_with_filter(&path, selected.identity, Some(&snapshot.filters))?;
         if let Some(processed) = bytes {
             if let Some(directory) = &snapshot.receipt_directory {
@@ -481,6 +487,8 @@ pub fn poll_once() -> AppResult<usize> {
         Err(error) => return Err(error.into()),
     };
     let config = load_config(&state)?;
+    // A remote result must be signable before processing any selected file.
+    let _ = signing_key(&state)?;
     let queue = PathBuf::from(OsString::from_wide(&config.queue));
     let pending = queue.join(&config.device_id).join("pending");
     let results = queue.join(&config.device_id).join("results");
@@ -540,6 +548,7 @@ pub fn poll_once() -> AppResult<usize> {
         let result_path = results.join(format!("result-{}.json", command.body.nonce));
         if result_path.try_exists()? {
             let existing: SignedResult = read_limited(&result_path, 64 * 1024)?;
+            verify_signed_result(&existing, &signed_result.public_key)?;
             if existing.body.nonce != signed_result.body.nonce
                 || existing.public_key != signed_result.public_key
                 || existing.signature != signed_result.signature
@@ -565,6 +574,219 @@ pub fn verify_result(path: &Path, trusted_public_key_path: &Path) -> AppResult<R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Exercise the real queue/replay flow with synthetic keys and an already
+    // captured, missing selection. No Credential Manager entry, scheduled task,
+    // or selected file processing is involved.
+    #[test]
+    fn signed_loopback_resumes_and_replays_without_touching_sentinel() {
+        struct Fixture {
+            root: PathBuf,
+            parent: PathBuf,
+            identity: crate::FileIdentity,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                crate::state::set_test_directory(None);
+                crate::recovery::set_test_keys(None);
+                let resolved = fs::canonicalize(&self.root).expect("resolve loopback fixture");
+                assert_eq!(resolved, self.root);
+                assert_eq!(resolved.parent(), Some(self.parent.as_path()));
+                assert_eq!(
+                    crate::state::directory_identity(&resolved).unwrap(),
+                    self.identity
+                );
+                assert!(
+                    resolved
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("zero-loopback-")
+                );
+                fs::remove_dir_all(resolved).expect("remove exact loopback fixture");
+            }
+        }
+        let parent = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random).unwrap();
+        let root = parent.join(format!("zero-loopback-{}", hex(&random)));
+        fs::create_dir(&root).unwrap();
+        let state = root.join("state");
+        let queue = root.join("queue");
+        let selected = root.join("selected");
+        fs::create_dir(&state).unwrap();
+        fs::create_dir(&queue).unwrap();
+        fs::create_dir(&selected).unwrap();
+        let fixture = Fixture {
+            root: root.clone(),
+            parent,
+            identity: crate::state::directory_identity(&root).unwrap(),
+        };
+        let sentinel = selected.join("sentinel.txt");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&sentinel)
+            .unwrap()
+            .write_all(b"must remain intact")
+            .unwrap();
+        let identity = crate::file_identity(&fs::File::open(&sentinel).unwrap()).unwrap();
+        crate::state::set_test_directory(Some(state.clone()));
+        let mut seeds = zeroize::Zeroizing::new([0u8; 96]);
+        getrandom::fill(&mut *seeds).unwrap();
+        let state_key = ed25519_dalek::SigningKey::from_bytes(seeds[..32].try_into().unwrap());
+        let target_key = ed25519_dalek::SigningKey::from_bytes(seeds[32..64].try_into().unwrap());
+        let controller = ed25519_dalek::SigningKey::from_bytes(seeds[64..].try_into().unwrap());
+        let target_public = hex(&target_key.verifying_key().to_bytes());
+        crate::recovery::set_test_keys(Some((state_key, target_key)));
+
+        // Pre-create root entries before signing. Wine can expose Unix directory
+        // metadata changes as Windows creation-time changes, unlike NTFS.
+        fs::create_dir(state.join("remote-working")).unwrap();
+        fs::create_dir(state.join("remote-done")).unwrap();
+        fs::write(state.join("agent.lock"), b"").unwrap();
+        fs::write(state.join("receipt-public-key.hex"), &target_public).unwrap();
+        fs::write(config_path(&state), b"").unwrap();
+        let state_identity = crate::state::directory_identity(&state).unwrap();
+
+        let config = DeviceConfig {
+            version: 1,
+            device_id: "loopback".into(),
+            queue: queue.as_os_str().encode_wide().collect(),
+            controller_public_key: hex(&controller.verifying_key().to_bytes()),
+            allowed_profiles: vec!["fixture".into()],
+        };
+        let signed_config = sign_config(&state, config).unwrap();
+        fs::write(
+            config_path(&state),
+            serde_json::to_vec(&signed_config).unwrap(),
+        )
+        .unwrap();
+        let body = CommandBody {
+            version: 1,
+            device_id: "loopback".into(),
+            profile: "fixture".into(),
+            nonce: hex(&random),
+            issued_unix_seconds: 1,
+        };
+        let command = SignedCommand {
+            signature: hex(&controller
+                .sign(&signing_bytes(COMMAND_DOMAIN, &body).unwrap())
+                .to_bytes()),
+            public_key: hex(&controller.verifying_key().to_bytes()),
+            body: body.clone(),
+        };
+        let pending = queue
+            .join("loopback/pending")
+            .join(format!("cmd-{}.json", body.nonce));
+        write_new(&pending, &command).unwrap();
+        let snapshot = Snapshot {
+            version: 2,
+            command: body.clone(),
+            files: vec![SnapshotFile {
+                path: selected
+                    .join("already-missing.txt")
+                    .as_os_str()
+                    .encode_wide()
+                    .collect(),
+                identity,
+            }],
+            receipt_directory: None,
+            filters: FileFilters::default(),
+        };
+        let working = state
+            .join("remote-working")
+            .join(format!("{}.json", body.nonce));
+        write_new(&working, &sign_snapshot(&state, snapshot).unwrap()).unwrap();
+
+        assert_eq!(
+            crate::state::directory_identity(&state).unwrap(),
+            state_identity
+        );
+
+        // A changed snapshot must fail before consuming the command or touching
+        // the sentinel. Restore the exact captured bytes for the resume case.
+        let authentic_snapshot = fs::read(&working).unwrap();
+        let mut altered: serde_json::Value = serde_json::from_slice(&authentic_snapshot).unwrap();
+        altered["signature"] = serde_json::Value::String("00".repeat(64));
+        fs::write(&working, serde_json::to_vec(&altered).unwrap()).unwrap();
+        assert!(poll_once().is_err());
+        assert!(pending.exists());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"must remain intact");
+        fs::write(&working, authentic_snapshot).unwrap();
+
+        // Even if the synthetic missing path appears, the test-only boundary
+        // refuses to call the real file-processing function.
+        let unexpected = selected.join("already-missing.txt");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&unexpected)
+            .unwrap()
+            .write_all(b"unexpected synthetic file")
+            .unwrap();
+        assert!(
+            poll_once()
+                .unwrap_err()
+                .to_string()
+                .contains("loopback fixture refuses")
+        );
+        assert_eq!(fs::read(&unexpected).unwrap(), b"unexpected synthetic file");
+        assert_eq!(fs::read(&sentinel).unwrap(), b"must remain intact");
+        let resolved = fs::canonicalize(&unexpected).unwrap();
+        assert_eq!(
+            resolved.parent(),
+            Some(fs::canonicalize(&selected).unwrap().as_path())
+        );
+        assert_eq!(resolved.file_name().unwrap(), "already-missing.txt");
+        fs::remove_file(resolved).unwrap();
+
+        assert_eq!(poll_once().unwrap(), 1);
+        assert!(!pending.exists());
+        assert!(!working.exists());
+        let result_path = queue
+            .join("loopback/results")
+            .join(format!("result-{}.json", body.nonce));
+        let result: SignedResult = read_limited(&result_path, 64 * 1024).unwrap();
+        verify_signed_result(&result, &target_public).unwrap();
+        assert_eq!(
+            (result.body.files_completed, result.body.files_missing),
+            (0, 1)
+        );
+        let completed = fs::read(&result_path).unwrap();
+        assert_eq!(fs::read(&sentinel).unwrap(), b"must remain intact");
+
+        // Replaying a valid command reuses the authenticated completion record.
+        write_new(&pending, &command).unwrap();
+        assert_eq!(poll_once().unwrap(), 1);
+        assert!(!pending.exists());
+        assert_eq!(fs::read(&result_path).unwrap(), completed);
+        assert_eq!(fs::read(&sentinel).unwrap(), b"must remain intact");
+
+        // An attacker controlling the shared queue must not be able to alter
+        // an existing result body while retaining its original signature.
+        let mut altered_result: serde_json::Value = serde_json::from_slice(&completed).unwrap();
+        altered_result["body"]["files_completed"] = serde_json::json!(99);
+        fs::write(&result_path, serde_json::to_vec(&altered_result).unwrap()).unwrap();
+        write_new(&pending, &command).unwrap();
+        assert!(
+            poll_once().is_err(),
+            "tampered published result was accepted"
+        );
+        assert!(pending.exists());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"must remain intact");
+        fs::remove_file(&pending).unwrap();
+        fs::write(&result_path, completed).unwrap();
+
+        // Signed body mutation must fail before any file processing or cleanup.
+        let mut tampered = command;
+        tampered.body.issued_unix_seconds += 1;
+        write_new(&pending, &tampered).unwrap();
+        assert!(poll_once().is_err());
+        assert!(pending.exists());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"must remain intact");
+        drop(fixture);
+    }
 
     #[test]
     fn remote_names_and_signatures_are_scoped() {

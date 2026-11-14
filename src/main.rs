@@ -75,7 +75,7 @@ fn run() -> AppResult<()> {
             format!("Zero {}", env!("CARGO_PKG_VERSION"))
         } else {
             format!(
-                "Zero {}\n\nProcess only the files or folders you explicitly select. Processing starts immediately and cannot be undone through Zero.\n\n--preview PATH: inspect without changing files\n--create-profile NAME PATH: save a selection\n--preview-profile NAME: inspect its matching files\n--profile NAME: process its saved selection\n--schedule NAME daily|weekdays|every-N HH:MM\n--unschedule NAME: remove its schedule\n--profiles: list saved selections\n\nPut --quiet first to suppress dialogs, followed by an optional --state-dir ABSOLUTE_PATH. Read README.md for filters, receipts, remote jobs and recovery. Scheduled tasks require a signed-in, awake, AC-powered session. Logical file cleanup does not erase backups, snapshots or historical physical blocks.",
+                "Zero {}\n\nProcess only the files or folders you explicitly select. Processing starts immediately and cannot be undone through Zero.\n\n--preview PATH: inspect without changing files\n--create-profile NAME PATH: save a selection\n--preview-profile NAME: inspect its matching files\n--profile NAME: process its saved selection\n--schedule NAME daily|weekdays|every-N HH:MM\n--unschedule NAME: remove its schedule\n--profiles: list saved selections\n--init-signing-key: explicitly initialize receipt and remote-result signing\n\nPut --quiet first to suppress dialogs, followed by an optional --state-dir ABSOLUTE_PATH. Read README.md for filters, receipts, remote jobs and recovery. Scheduled tasks require a signed-in, awake, AC-powered session. Logical file cleanup does not erase backups, snapshots or historical physical blocks.",
                 env!("CARGO_PKG_VERSION")
             )
         };
@@ -87,6 +87,20 @@ fn run() -> AppResult<()> {
         return Ok(());
     }
     state::initialize(&mut args)?;
+    if args.peek().is_some_and(|arg| arg == "--init-signing-key") {
+        args.next();
+        if args.next().is_some() {
+            return Err("too many signing-key initialization arguments".into());
+        }
+        receipts::initialize_signing_key(&state_directory()?)?;
+        if !quiet {
+            show_dialog(
+                "Zero",
+                "Receipt and remote-result signing key is ready for this Windows account and state directory.",
+            );
+        }
+        return Ok(());
+    }
     if args.peek().is_some_and(|arg| arg == "--verify-receipt") {
         args.next();
         let path = PathBuf::from(args.next().ok_or("receipt path is required")?);
@@ -475,6 +489,8 @@ fn run() -> AppResult<()> {
         }) {
             return Err("receipt directory must be outside selected folders".into());
         }
+        // Refuse missing or untrusted signing state before a selected file changes.
+        let _ = receipts::signing_key(&state_directory()?)?;
     }
 
     let mut completed = 0;

@@ -1,97 +1,12 @@
+use crate::recovery;
 use crate::storage::StorageAssessment;
 use crate::{AppResult, state_directory};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use std::ffi::c_void;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use zeroize::{Zeroize, Zeroizing};
-
-#[repr(C)]
-struct DataBlob {
-    length: u32,
-    data: *mut u8,
-}
-
-#[link(name = "crypt32")]
-unsafe extern "system" {
-    fn CryptProtectData(
-        input: *const DataBlob,
-        description: *const u16,
-        entropy: *const DataBlob,
-        reserved: *mut c_void,
-        prompt: *const c_void,
-        flags: u32,
-        output: *mut DataBlob,
-    ) -> i32;
-    fn CryptUnprotectData(
-        input: *const DataBlob,
-        description: *mut *mut u16,
-        entropy: *const DataBlob,
-        reserved: *mut c_void,
-        prompt: *const c_void,
-        flags: u32,
-        output: *mut DataBlob,
-    ) -> i32;
-}
-
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn LocalFree(memory: *mut c_void) -> *mut c_void;
-}
-
-const CRYPTPROTECT_UI_FORBIDDEN: u32 = 1;
-
-fn dpapi(input: &[u8], protect: bool) -> AppResult<Zeroizing<Vec<u8>>> {
-    let input_len: u32 = input.len().try_into()?;
-    let source = DataBlob {
-        length: input_len,
-        data: input.as_ptr() as *mut u8,
-    };
-    let mut output = DataBlob {
-        length: 0,
-        data: std::ptr::null_mut(),
-    };
-    let ok = if protect {
-        // Source and destination buffers remain valid until this synchronous Windows call returns.
-        unsafe {
-            CryptProtectData(
-                &source,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                CRYPTPROTECT_UI_FORBIDDEN,
-                &mut output,
-            )
-        }
-    } else {
-        unsafe {
-            CryptUnprotectData(
-                &source,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                CRYPTPROTECT_UI_FORBIDDEN,
-                &mut output,
-            )
-        }
-    };
-    if ok == 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    // Windows owns the allocated output. Copy it into a zeroizing buffer before freeing it.
-    let result = Zeroizing::new(unsafe {
-        std::slice::from_raw_parts(output.data, output.length as usize).to_vec()
-    });
-    // Clear the DPAPI allocation before returning it to the Windows heap.
-    unsafe { std::slice::from_raw_parts_mut(output.data, output.length as usize).zeroize() };
-    unsafe { LocalFree(output.data.cast()) };
-    Ok(result)
-}
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -112,43 +27,48 @@ pub(crate) fn unhex<const N: usize>(value: &str) -> AppResult<[u8; N]> {
 }
 
 pub(crate) fn signing_key(state_dir: &Path) -> AppResult<SigningKey> {
+    let key = recovery::receipt_key(state_dir)?;
+    check_or_write_public_key(state_dir, &key)?;
+    Ok(key)
+}
+
+pub fn initialize_signing_key(state_dir: &Path) -> AppResult<()> {
     fs::create_dir_all(state_dir)?;
-    let path = state_dir.join("receipt-signing-key.dpapi");
-    let secret = if path.try_exists()? {
-        let protected = fs::read(&path)?;
-        if protected.len() > 64 * 1024 {
-            return Err("protected receipt key is too large".into());
-        }
-        dpapi(&protected, false)?
-    } else {
-        let mut generated = Zeroizing::new(vec![0u8; 32]);
-        getrandom::fill(&mut generated)?;
-        let protected = dpapi(&generated, true)?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        file.write_all(&protected)?;
-        file.sync_all()?;
-        generated
-    };
-    let array = Zeroizing::new(<[u8; 32]>::try_from(secret.as_slice())?);
-    let key = SigningKey::from_bytes(&array);
+    let key = recovery::initialize_receipt_key(state_dir)?;
+    check_or_write_public_key(state_dir, &key)
+}
+
+fn check_or_write_public_key(state_dir: &Path, key: &SigningKey) -> AppResult<()> {
     let public_path = state_dir.join("receipt-public-key.hex");
     let public = hex(&key.verifying_key().to_bytes());
     if public_path.try_exists()? {
         if fs::read_to_string(public_path)?.trim() != public {
-            return Err("receipt public key does not match the protected signing key".into());
+            return Err(
+                "receipt public key does not match the current user's signing credential".into(),
+            );
         }
     } else {
-        let mut file = OpenOptions::new()
+        match OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(public_path)?;
-        file.write_all(public.as_bytes())?;
-        file.sync_all()?;
+            .open(&public_path)
+        {
+            Ok(mut file) => {
+                file.write_all(public.as_bytes())?;
+                file.sync_all()?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if fs::read_to_string(public_path)?.trim() != public {
+                    return Err(
+                        "receipt public key does not match the current user's signing credential"
+                            .into(),
+                    );
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
-    Ok(key)
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -177,9 +97,24 @@ pub fn write_receipt(
     storage: &StorageAssessment,
     output: &Path,
 ) -> AppResult<PathBuf> {
+    write_receipt_with_state(
+        &state_directory()?,
+        selected_path,
+        original_bytes,
+        storage,
+        output,
+    )
+}
+
+fn write_receipt_with_state(
+    state_dir: &Path,
+    selected_path: &Path,
+    original_bytes: u64,
+    storage: &StorageAssessment,
+    output: &Path,
+) -> AppResult<PathBuf> {
+    let key = signing_key(state_dir)?;
     fs::create_dir_all(output)?;
-    let state_dir = state_directory()?;
-    let key = signing_key(&state_dir)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let body = ReceiptBody {
         format_version: 2,
@@ -247,16 +182,13 @@ mod tests {
     }
 
     #[test]
-    fn dpapi_round_trip_and_receipt_tampering_check() {
-        let protected = dpapi(b"secret round trip", true).unwrap();
-        let recovered = dpapi(&protected, false).unwrap();
-        assert_eq!(recovered.as_slice(), b"secret round trip");
-
-        let state = state_directory().unwrap();
-        let mut id = [0u8; 8];
-        getrandom::fill(&mut id).unwrap();
-        let output = std::env::temp_dir().join(format!("zero-receipts-{}", hex(&id)));
-        let receipt = write_receipt(
+    fn credential_backed_receipt_and_tampering_check() {
+        let root = crate::tests::test_root("receipts");
+        let state = root.join("state");
+        let output = root.join("receipts");
+        initialize_signing_key(&state).unwrap();
+        let receipt = write_receipt_with_state(
+            &state,
             Path::new("test-file.txt"),
             17,
             &StorageAssessment {
@@ -268,6 +200,18 @@ mod tests {
         )
         .unwrap();
         let trusted = fs::read_to_string(state.join("receipt-public-key.hex")).unwrap();
+        fs::write(
+            state.join("receipt-signing-key.dpapi"),
+            b"untrusted legacy blob",
+        )
+        .unwrap();
+        assert_eq!(
+            signing_key(&state).unwrap().verifying_key().to_bytes(),
+            unhex::<32>(trusted.trim()).unwrap()
+        );
+        fs::write(state.join("receipt-public-key.hex"), "00".repeat(32)).unwrap();
+        assert!(signing_key(&state).is_err());
+        fs::write(state.join("receipt-public-key.hex"), &trusted).unwrap();
         assert_eq!(
             verify_receipt(&receipt, &trusted).unwrap().original_bytes,
             17
@@ -275,7 +219,30 @@ mod tests {
         let original = fs::read_to_string(&receipt).unwrap();
         fs::write(&receipt, original.replace("17", "18")).unwrap();
         assert!(verify_receipt(&receipt, &trusted).is_err());
-        fs::remove_dir_all(output).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_key_requires_explicit_review_before_initialization() {
+        let root = crate::tests::test_root("legacy-receipt-key");
+        fs::write(
+            root.join("receipt-signing-key.dpapi"),
+            b"synthetic legacy key",
+        )
+        .unwrap();
+        fs::write(root.join("receipt-public-key.hex"), b"synthetic public key").unwrap();
+        assert!(
+            initialize_signing_key(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("legacy receipt/result signing state")
+        );
+        assert_eq!(
+            fs::read(root.join("receipt-public-key.hex")).unwrap(),
+            b"synthetic public key"
+        );
+        assert!(signing_key(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

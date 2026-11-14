@@ -60,7 +60,7 @@ Scheduling uses Windows Task Scheduler under the current user. Stay signed in to
 
 `--state-dir` requires version 0.6.2 or newer. Version 0.6.1 does not support it; do not pass this option to that version.
 
-Use the leading `--state-dir` option to choose an absolute directory for profiles, receipt and remote signing keys, recovery records, remote enrollment and job history. The recovery-record signing key is held separately in the current Windows user's Credential Manager. Put `--state-dir` after `--quiet`, if used, and before the command. Use the same location for subsequent commands:
+Use the leading `--state-dir` option to choose an absolute directory for profiles, public keys, recovery records, remote enrollment and job history. Current receipt, remote-result, and recovery-record signing keys are held in the current Windows user's Credential Manager. Put `--state-dir` after `--quiet`, if used, and before the command. Use the same location for subsequent commands:
 
 ```powershell
 .\Zero.exe --state-dir "D:\Zero State" --create-profile DownloadsClean "D:\Drop Folder"
@@ -92,13 +92,14 @@ Filters are optional when creating a saved profile. This example includes `.log`
 Receipts are off by default. To write a signed JSON record for each successfully processed file, pass a directory outside the selected folders:
 
 ```powershell
+.\Zero.exe --init-signing-key
 .\Zero.exe --receipts "D:\Zero Receipts" "D:\Disposable\example.txt"
 .\Zero.exe --create-profile WithReceipts --receipts "D:\Zero Receipts" "D:\Drop Folder"
 .\Zero.exe --export-key "D:\Zero Receipts\trusted-public-key.hex"
 .\Zero.exe --verify-receipt "D:\Zero Receipts\zero-REPLACE.json" "D:\Zero Receipts\trusted-public-key.hex"
 ```
 
-The receipt signing key is a separate, persistent Ed25519 key protected for the current Windows user with DPAPI. The per-file AES key is still cleared after use. Transfer and trust the public key independently of the receipt. New receipts include the observed storage context. A valid signature attests that this app signed the listed actions and observations; it cannot prove physical erasure, historical-copy removal, or that the signing computer was uncompromised.
+Initialize receipt and remote-result signing explicitly once for each state directory before requesting a receipt, exporting a key, or using remote jobs. The persistent Ed25519 signing seed is held in the current Windows user's Credential Manager and is bound to that state directory's Windows identity. Later runs under the same Windows account, including its scheduled tasks, reuse it. A missing credential stops receipt-backed file processing and agent polling before a selected file changes. The per-file AES key is still cleared after use. Transfer and trust the public key independently of the receipt. New receipts include the observed storage context. A valid signature attests that this app signed the listed actions and observations; it cannot prove physical erasure, historical-copy removal, or that the signing computer was uncompromised.
 
 ## Authenticated remote jobs
 
@@ -107,6 +108,7 @@ Zero can use a shared directory as a job queue. This may be a user-managed sync 
 On the controller:
 
 ```powershell
+.\Zero.exe --init-signing-key
 .\Zero.exe --export-key "D:\controller-public.hex"
 ```
 
@@ -114,6 +116,7 @@ On the target, first create a local profile. Transfer the controller public key 
 
 ```powershell
 .\Zero.exe --create-profile RemoteClean "D:\Drop Folder"
+.\Zero.exe --init-signing-key
 .\Zero.exe --enroll LaptopA "D:\Shared Zero Queue" "D:\controller-public.hex" RemoteClean
 .\Zero.exe --export-key "D:\target-public.hex"
 ```
@@ -153,6 +156,8 @@ Builds with signed recovery records keep their signing key in the current Window
 These builds also leave an older unsigned `pending-*.json` record untouched and stop automatic recovery. If this happens during an upgrade, stop the affected tasks and inspect the record before any retry. To finish a verified, intentionally selected file, copy only that record to a new state directory writable only by your Windows account, create a profile for an empty disposable folder there with the older Zero executable that wrote the record, and run that empty profile with the same private state directory. The older executable will attempt recovery before processing the empty profile. Confirm that the intended file is gone and the copied record was removed; only then archive the original unsigned record and resume the upgraded task. If the record's source is unfamiliar or the file must be preserved, leave the record and file untouched for manual review. Do not run the older executable against a state directory other users can write.
 
 Saved profiles, remote enrollment, and interrupted remote working snapshots are also authenticated by current builds. Their signatures are bound to the state directory's Windows identity; a saved profile is also bound to its name. Moving or copying these records to another state store requires operator review and re-creation. Older unsigned versions remain intact, but processing stops until an operator reviews them. Before upgrading a scheduled profile, stop its task, inspect the saved paths and filters, archive the old profile file, then recreate the same profile name from the intended selections with the current executable and verify its preview before restarting the task. For remote enrollment, stop the poller, review its queue, controller key, and allowed profiles, archive the old enrollment, then enroll again with the trusted controller public key. An old interrupted remote snapshot may describe partly processed files; keep it and its signed command for manual review. Do not delete or resume it merely to clear the error. If an old enrollment prevents `--remove-agent`, remove its exact task in Task Scheduler after inspection. Use a state directory writable only by the operator account throughout migration.
+
+An older `receipt-signing-key.dpapi` or `receipt-public-key.hex` in a state store blocks `--init-signing-key` when no Credential Manager key exists. Zero does not import an unauthenticated legacy key or silently rotate the signing identity. Stop receipt-backed and remote tasks, keep the old public key in a separately trusted location for verifying historical receipts and results, and archive both old key files in a private operator-only location before an explicit rotation. After reviewing outstanding jobs, remove the archived key files from the active state store, run `--init-signing-key`, and export and pin the new public key independently. Remote targets must be re-enrolled with a controller's new public key; controllers must pin a target's new public key before trusting new results. Do not treat a public key still inside a broadly writable state store as proof of the old signing identity. If the old key must be preserved for future signing, keep the task stopped until a trusted migration procedure is available.
 
 ### Scheduler verification: 2026-10-02
 
