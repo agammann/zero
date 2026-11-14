@@ -1372,6 +1372,9 @@ fn overwrite_and_delete(mut file: File, source: &Path) -> AppResult<()> {
 }
 
 #[cfg(test)]
+mod recovery_account_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
