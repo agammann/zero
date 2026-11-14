@@ -1,6 +1,6 @@
 # Build Zero
 
-Zero 1.0.1 supports Windows 11 x64. The published executable uses Rust 1.98.1 with the standard MSVC target. Install Rust through [rustup](https://rust-lang.org/tools/install/) and the Visual Studio C++ build tools and Windows SDK. In PowerShell:
+Zero 1.0.2 supports Windows 11 x64. The published executable uses Rust 1.98.1 with the standard MSVC target. Install Rust through [rustup](https://rust-lang.org/tools/install/) and the Visual Studio C++ build tools and Windows SDK. In PowerShell:
 
 ```powershell
 rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
@@ -12,7 +12,7 @@ If Windows PowerShell blocks a downloaded script, inspect the extracted source f
 
 The build runs formatting, all unit tests, Clippy and a locked release compilation. Its output is `build\Zero.exe`; `build\BUILD.json` records the source files, executable digest, compiler and checks. A failed check keeps the previous successful output. A successful rebuild keeps the previous output under `build-history`. Build logs are retained. The tests use disposable files and temporary state. The Windows GNU target can also be used with its corresponding linker; it is the locally tested alternative, while release CI uses MSVC.
 
-The source ZIP contains the same source and a `RELEASE.json` inventory. Extract it completely before building. Git is optional for building the ZIP. After editing the source, a local build records the edited bytes without claiming the original release identity. To contribute, clone the repository, make a focused change, run the build and disposable core checks, and open a pull request. Existing state formats remain compatible with 0.6.2.
+The source ZIP contains the same source and a `RELEASE.json` inventory. Extract it completely before building. Git is optional for building the ZIP. After editing the source, a local build records the edited bytes without claiming the original release identity. To contribute, clone the repository, make a focused change, run the build and disposable core checks, and open a pull request. Version 1.0.2 authenticates persistent state and refuses older unsigned records; read the [upgrade procedure](README.md#upgrade-and-recovery) before using an existing state directory.
 
 ```powershell
 .\scripts\verify-core.ps1 -Executable .\build\Zero.exe
