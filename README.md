@@ -2,7 +2,7 @@
 
 Zero is a free, open-source Windows app that processes and removes the files and folders you explicitly select. It works locally without an account, subscription, or API key.
 
-Version 1.0.1 targets Windows 11 x64. It keeps the profile, receipt and remote-job formats from 0.6.2.
+Version 1.0.2 targets Windows 11 x64. It authenticates persistent processing state and stores signing keys in the current Windows user's Credential Manager. Read [upgrade and recovery](#upgrade-and-recovery) before using an older state directory.
 
 [Download Zero for Windows](https://github.com/agammann/zero/releases/latest) · [Read the storage model](STORAGE_AND_KEY_MODEL.md) · [Build from source](#build-and-test)
 
@@ -145,7 +145,7 @@ The build checks formatting, all unit tests and Clippy, then writes `build\Zero.
 
 ## Upgrade and recovery
 
-Extract a new Windows release into a separate directory. Do not delete or replace an existing state directory to upgrade: it contains profiles, recovery records, trust keys and remote job history. Version 1.0.1 retains 0.6.2's state and signature formats. Keep receipt public keys available independently for verifying old records.
+Extract a new Windows release into a separate directory. Do not delete or replace an existing state directory to upgrade: it contains profiles, recovery records, trust keys and remote job history. Version 1.0.2 authenticates new persistent state and refuses older unsigned records and state-held signing keys. The procedures below cover pending recovery, profile and enrollment recreation, interrupted remote work, and explicit signing-key rotation. Keep receipt public keys available independently for verifying old records.
 
 Existing scheduled tasks point to their original executable. Unschedule them using the original executable and the same default or explicit state option, then schedule again using the new executable after checking its preview. Keep the executable in that stable path. For an agent, use `--remove-agent` with its original state, then enroll the new executable with the same trusted controller key and selected profiles. Keep queue and completed-job records; removing them weakens replay protection.
 

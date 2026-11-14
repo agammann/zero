@@ -1,6 +1,6 @@
 # Zero: storage and key model
 
-This document describes version 1.0.1's implemented file-level sequence, which is unchanged from 1.0.0. It is not a certification that every historical copy is gone.
+This document describes version 1.0.2's implemented file-level sequence, which is unchanged from 1.0.1. It is not a certification that every historical copy is gone.
 
 State paths below use the default `%LOCALAPPDATA%\Zero`; a leading `--state-dir` instead selects one explicit store for profiles, public keys, recovery and remote-job records. The state-record signing key for pending recovery, saved profiles, remote enrollment, and remote working snapshots is held in the current Windows user's Credential Manager. Receipt and remote-result signing uses a separate Credential Manager key initialized explicitly for each state directory. Newly registered tasks retain and check the state directory's Windows identity before state access. Older unsigned records and legacy state-held signing keys are not automatically migrated. This does not establish that other saved paths resolve identically across Windows filesystem views.
 
@@ -10,11 +10,11 @@ State paths below use the default `%LOCALAPPDATA%\Zero`; a leading `--state-dir`
 2. Obtain a fresh 256-bit AES key and nonce prefix from the operating-system random source. Keep the working key in process memory. No file-specific key file, account, or remote key service is used.
 3. Create a uniquely named stage in the source directory using `FILE_FLAG_DELETE_ON_CLOSE`. Encrypt source chunks with AES-256-GCM. Write the header, ciphertext, lengths, and authentication tags; no plaintext is written to the stage. Chunk and final-frame authentication bind the stream to its header and order.
 4. Flush the stage. Read and authenticate every frame and compare recovered bytes against the selected original. Recovered plaintext remains in temporary process memory.
-5. Write a recovery record under `%LOCALAPPDATA%\Zero` containing only the original and stage paths and file identities. Copy the verified encrypted stage over the selected file through the same exclusive handle. Flush, read back, and compare a SHA-256 digest of the current logical file with the staged ciphertext.
+5. Write an authenticated recovery record under the chosen state directory containing the original and stage paths and file identities. Copy the verified encrypted stage over the selected file through the same exclusive handle. Flush, read back, and compare a SHA-256 digest of the current logical file with the staged ciphertext.
 6. Zeroize the working AES key. The AES-GCM dependency is built with its `zeroize` feature to clear cipher state on drop. Close the stage handle and check that the stage path is gone.
 7. Overwrite the encrypted source once with fresh random bytes, flush, check the logical readback, mark the same handle for deletion, and close it. Check that the selected path is absent, then remove the recovery record.
 
-After success, no encrypted file or per-file AES key is intentionally retained. The recovery record contains paths and file identities but no key or ciphertext. Optional receipts use a separate persistent Ed25519 signing key protected by Windows DPAPI for the current user; that signing key cannot decrypt files. New signed receipts include the observed storage context, and new signed remote results include aggregate context for files completed during that attempt. No storage assessment is retained by default for ordinary local runs.
+After success, no encrypted file or per-file AES key is intentionally retained. While pending, a recovery record contains paths, file identities, and authentication data, but no file key or ciphertext. Optional receipts use a separate persistent Ed25519 signing key in the current Windows user's Credential Manager; that signing key cannot decrypt files. New signed receipts include the observed storage context, and new signed remote results include aggregate context for files completed during that attempt. No storage assessment is retained by default for ordinary local runs.
 
 ## Interruption and errors
 
@@ -42,6 +42,6 @@ Zero refuses files with named data streams because its file-level overwrite targ
 
 - [NIST SP 800-88 Rev. 2](https://csrc.nist.gov/pubs/sp/800/88/r2/final) explains media sanitization methods and verification limits.
 - [Windows `FILE_FLAG_DELETE_ON_CLOSE`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew) defines the stage handle's deletion behavior.
-- [Windows Data Protection API](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata) protects the optional signing key for the current Windows user.
+- Windows Credential Manager [`CredWriteW`](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credwritew) and [`CredReadW`](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credreadw) store and retrieve the current user's state and receipt signing keys.
 - [Windows `GetDriveTypeW`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getdrivetypew), [`GetVolumePathNameW`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumepathnamew), and [`GetVolumeInformationByHandleW`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationbyhandlew) define the read-only storage-context queries.
 - [Windows `FILE_STREAM_INFO`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_stream_info) defines the handle-based stream enumeration used to refuse named streams.

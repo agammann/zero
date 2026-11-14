@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.0.2
 
-- Sign new pending recovery records with a key held in the current Windows user's Credential Manager. Automatic recovery refuses older unsigned records and leaves them intact for manual review.
-- Authenticate saved profiles, remote enrollment, and interrupted remote working snapshots with the same user-bound credential, using separate signature domains. Older unsigned state stops for operator review before file processing.
-- Keep new receipt and remote-result signing keys in the current user's Credential Manager, with explicit per-store initialization. Legacy state-held keys are never imported or rotated automatically.
+- Sign new pending recovery records with a key in the current Windows user's Credential Manager. Older unsigned records stop automatic recovery and remain for operator review.
+- Authenticate saved profiles, remote enrollment, and interrupted remote working snapshots before they can drive file processing. Older unsigned profiles and enrollment remain intact until reviewed and recreated. Interrupted remote work requires individual review.
+- Keep new receipt and remote-result signing keys in the current user's Credential Manager. Run `--init-signing-key` once per state directory before issuing receipts or remote signatures. Legacy state-held keys are never imported or rotated automatically; review and archive them privately before an explicit rotation, then re-enroll remote peers with newly trusted public keys.
+- Update pinned serde, serde_json, zeroize, sha2, and ed25519-dalek dependencies. Verify previously signed receipts, results, and remote commands with fixed compatibility fixtures.
 
 ## 1.0.1
 
