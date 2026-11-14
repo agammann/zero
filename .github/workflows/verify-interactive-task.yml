@@ -1,0 +1,38 @@
+name: Disposable InteractiveToken verification
+
+on:
+  push:
+    branches: [test/interactive-task-nov13]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  interactive-task:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Build the unchanged product
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed.' }
+          cargo build --locked --release
+          if ($LASTEXITCODE -ne 0) { throw 'Product build failed.' }
+      - name: Verify an actual InteractiveToken task
+        shell: pwsh
+        run: ./scripts/verify-interactive-task.ps1 -Executable ./target/release/zero.exe
+      - name: Upload synthetic task evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: zero-interactive-task-${{ github.sha }}
+          path: ${{ runner.temp }}/zero-interactive-results/
+          if-no-files-found: error
+          retention-days: 7
