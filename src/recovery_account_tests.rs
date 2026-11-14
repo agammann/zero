@@ -78,7 +78,7 @@ fn recovery_cross_account_driver() {
             let expected = if mode == "reject-missing" {
                 "recovery credential is unavailable; automatic recovery refused"
             } else {
-                "recovery record authentication failed"
+                "state record authentication failed"
             };
             assert_eq!(error, expected);
             for (path, (bytes, identity)) in paths.iter().zip(snapshots) {
