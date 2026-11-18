@@ -37,8 +37,13 @@ pub enum TaskKind {
     Agent,
 }
 
-impl State {
-    fn parse(args: &mut Peekable<impl Iterator<Item = OsString>>) -> AppResult<Self> {
+pub struct Options {
+    directory: Option<PathBuf>,
+    expected: Option<FileIdentity>,
+}
+
+impl Options {
+    pub fn parse(args: &mut Peekable<impl Iterator<Item = OsString>>) -> AppResult<Self> {
         let mut directory = None;
         let mut expected = None;
         while let Some(option) = args.peek().and_then(|arg| arg.to_str()) {
@@ -68,18 +73,27 @@ impl State {
         if expected.is_some() && directory.is_none() {
             return Err("scheduled state identity requires --state-dir".into());
         }
-        let explicit_directory = directory.is_some();
-        let directory = match directory {
-            Some(path) => path,
-            None => default_directory()?,
-        };
         Ok(Self {
-            directory: std::path::absolute(directory)?,
+            directory,
             expected,
-            explicit_directory,
         })
     }
 
+    fn resolve(self) -> AppResult<State> {
+        let explicit_directory = self.directory.is_some();
+        let directory = match self.directory {
+            Some(path) => path,
+            None => default_directory()?,
+        };
+        Ok(State {
+            directory: std::path::absolute(directory)?,
+            expected: self.expected,
+            explicit_directory,
+        })
+    }
+}
+
+impl State {
     fn checked_directory(&self) -> AppResult<PathBuf> {
         if let Some(expected) = self.expected
             && directory_identity(&self.directory)? != expected
@@ -117,8 +131,8 @@ fn default_directory() -> AppResult<PathBuf> {
     Ok(PathBuf::from(appdata).join("Zero"))
 }
 
-pub fn initialize(args: &mut Peekable<impl Iterator<Item = OsString>>) -> AppResult<()> {
-    let state = State::parse(args)?;
+pub fn initialize(options: Options) -> AppResult<()> {
+    let state = options.resolve()?;
     // Do not expose a state path to logging or any other consumer before this check succeeds.
     state.checked_directory()?;
     STATE
@@ -245,7 +259,7 @@ mod tests {
     use std::fs;
 
     fn parse(command: &[&str]) -> AppResult<State> {
-        State::parse(&mut command.iter().map(OsString::from).peekable())
+        Options::parse(&mut command.iter().map(OsString::from).peekable())?.resolve()
     }
 
     fn windows_arguments(command: &OsStr) -> Vec<OsString> {
@@ -281,7 +295,7 @@ mod tests {
             .into_iter()
             .map(OsString::from)
             .peekable();
-        let state = State::parse(&mut args).unwrap();
+        let state = Options::parse(&mut args).unwrap().resolve().unwrap();
         assert_eq!(state.directory, Path::new(r"Z:\Chosen State"));
         assert!(state.explicit_directory);
         assert_eq!(args.collect::<Vec<_>>(), ["--profile", "Saved"]);
@@ -298,6 +312,37 @@ mod tests {
         ] {
             assert!(parse(&invalid).is_err());
         }
+    }
+
+    #[test]
+    fn leading_state_options_are_syntax_only_until_resolution() {
+        let root = crate::tests::test_root("information-options");
+        let missing = root.join("missing-state");
+        for command in ["--help", "--version"] {
+            let mut args = [
+                OsString::from("--state-dir"),
+                missing.as_os_str().to_owned(),
+                OsString::from("--state-id"),
+                OsString::from("00000000:0000000000000000:0000000000000000"),
+                OsString::from(command),
+            ]
+            .into_iter()
+            .peekable();
+            let options = Options::parse(&mut args).unwrap();
+            assert_eq!(options.directory, Some(missing.clone()));
+            assert!(options.expected.is_some());
+            assert_eq!(args.next().unwrap(), command);
+            assert!(args.next().is_none());
+            assert!(!missing.exists());
+            assert!(options.resolve().unwrap().checked_directory().is_err());
+            assert!(!missing.exists());
+        }
+        let mut args = [OsString::from("--help")].into_iter().peekable();
+        let options = Options::parse(&mut args).unwrap();
+        assert!(options.directory.is_none());
+        assert!(options.expected.is_none());
+        assert_eq!(args.next().unwrap(), "--help");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -346,7 +391,7 @@ mod tests {
             assert_eq!(decoded[0], r"Z:\Program Files\Zero.exe");
             assert_eq!(decoded[1], "--quiet");
             let mut args = decoded.into_iter().skip(2).peekable();
-            let state = State::parse(&mut args).unwrap();
+            let state = Options::parse(&mut args).unwrap().resolve().unwrap();
             assert_eq!(state.checked_directory().unwrap(), directory);
             assert_eq!(
                 state.expected,

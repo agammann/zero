@@ -1,6 +1,13 @@
 # Zero verification
 
-The v1 checks cover Windows 11 x64 selected-file cleanup and its supported local scheduling environment. They use new disposable files, separate explicit state directories and uniquely identified temporary tasks. Existing user files, keys, profiles and tasks are outside the tests.
+The v1 checks cover Windows 11 x64 selected-file cleanup and its supported local scheduling environment. They use new disposable files, separate explicit state directories and uniquely identified temporary tasks. Existing user files, profiles and tasks are outside the selected fixtures. The full suite can read or create Zero signing keys in the current Windows account's Credential Manager. Use a disposable account for those checks.
+
+
+## November 17, 2026 informational command checks
+
+Version 1.0.2 refused help and version after a leading `--state-dir` and replaced an existing quiet-mode error log. Version 1.0.3 separates state-option syntax from state resolution. Informational commands return before initializing state, checking a bound directory or accessing signing credentials. The added parser regression uses a missing fixture directory. The executable core journey also checks retained error and recovery records and rejected trailing arguments.
+
+Local checks used Rust and Cargo 1.98.1 with the Windows GNU target and Node 24.19.0. Formatting and all five release-artifact reader tests passed. Windows Application Control blocked Cargo's generated `quote` and `serde_json` build helpers with error 4551, so the local compilation and selected unit suite did not complete. The full build, credential-backed tests, destructive core journey and paired-package checks remain required on the existing disposable Windows CI runner. No local processing, credential initialization, queue or scheduled-task operation was run for this change.
 
 The repeatable build checks formatting, unit tests, Clippy, executable version and exact source inputs. `scripts/verify-core.ps1` checks the actual executable with disposable selections, sibling preservation, signed receipt verification and tampering, saved-profile filters and duplicate protection, corrupt-profile preservation, informational commands and the disabled whole-volume command. `BUILD.json` and the paired package manifests tie these checks to the delivered source and executable.
 
