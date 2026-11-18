@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.3
+
+- Accept valid leading state options for help and version without resolving or initializing state, accessing signing credentials or changing an existing error log.
+- Check informational argument handling with a missing bound directory and retained error and recovery records.
+- Document the persistent Credential Manager effects of the full unit and core verification suites.
+
 ## 1.0.2
 
 - Sign new pending recovery records with a key in the current Windows user's Credential Manager. Older unsigned records stop automatic recovery and remain for operator review.

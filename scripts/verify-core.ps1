@@ -23,6 +23,17 @@ try {
     Check ($h.exitCode -eq 0 -and $h.stdout.Contains('--preview')) 'help command'
     [IO.File]::WriteAllText((Join-Path $info 'pending-keep.json'),'{corrupt recovery fixture}')
     $original=Get-ZeroHash (Join-Path $info 'pending-keep.json')
+    $priorError=Join-Path $info 'last-error.txt'; [IO.File]::WriteAllText($priorError,'prior error stays untouched')
+    $errorHash=Get-ZeroHash $priorError
+    foreach ($command in @('--help','--version')) {
+        $result=Run @($command) $info
+        Check ($result.stdout.Contains('Zero ') -and (Get-ZeroHash $priorError) -eq $errorHash -and (Get-ZeroHash (Join-Path $info 'pending-keep.json')) -eq $original) "leading state options with $command preserve informational state"
+        $null=Run @($command,'extra') $info 1
+        Check ((Get-ZeroHash $priorError) -eq $errorHash -and (Get-ZeroHash (Join-Path $info 'pending-keep.json')) -eq $original) "$command trailing arguments preserve informational state"
+        $missing=Join-Path $root 'missing-information-state'
+        $result=Invoke-ZeroProcess $exe @('--quiet','--state-dir',$missing,'--state-id','00000000:0000000000000000:0000000000000000',$command) $root 10
+        Check ($result.exitCode -eq 0 -and !(Test-Path -LiteralPath $missing)) "$command does not inspect a bound missing state directory"
+    }
     $null=Run @() $info
     $null=Run @('--unsupported-option') $info 1
     Check ((Get-ZeroHash (Join-Path $info 'pending-keep.json')) -eq $original) 'empty selection and unknown option preserve recovery record'

@@ -2,7 +2,7 @@
 
 Zero is a free, open-source Windows app that processes and removes the files and folders you explicitly select. It works locally without an account, subscription, or API key.
 
-Version 1.0.2 targets Windows 11 x64. It authenticates persistent processing state and stores signing keys in the current Windows user's Credential Manager. Read [upgrade and recovery](#upgrade-and-recovery) before using an older state directory.
+Version 1.0.3 targets Windows 11 x64. It authenticates persistent processing state and stores signing keys in the current Windows user's Credential Manager. Read [upgrade and recovery](#upgrade-and-recovery) before using an older state directory.
 
 [Download Zero for Windows](https://github.com/agammann/zero/releases/latest) · [Read the storage model](STORAGE_AND_KEY_MODEL.md) · [Build from source](#build-and-test)
 
@@ -38,7 +38,7 @@ The advanced commands below are run from PowerShell. Put `--quiet` first to supp
 | List saved selections | `.\Zero.exe --profiles` |
 | Verify a signed receipt | `.\Zero.exe --verify-receipt "D:\Receipts\receipt.json" "D:\trusted-public-key.hex"` |
 
-Help, version and opening Zero without a selection do not start recovery or processing. An unknown option is refused before pending recovery. To select a file whose name starts with `--`, supply its full absolute path.
+Help and version accept valid leading state options without resolving the directory, accessing credentials or changing `last-error.txt`. Opening Zero without a selection does not start recovery or processing. An unknown option is refused before pending recovery. To select a file whose name starts with `--`, supply its full absolute path.
 
 Preview commands use a visible dialog and do not accept `--quiet`. Profile runs keep their selected folders for reuse. Direct drops remove empty selected folders. If a batch stops, read the error before retrying: earlier files may already be gone, and an interrupted file operation may be completed on a later processing run.
 

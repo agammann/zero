@@ -62,7 +62,8 @@ fn run() -> AppResult<()> {
     if quiet {
         args.next();
     }
-    // Informational commands never initialize state or attempt pending recovery.
+    let state_options = state::Options::parse(&mut args)?;
+    // Informational commands consume state syntax without resolving or initializing it.
     if args
         .peek()
         .is_some_and(|arg| arg == "--help" || arg == "--version")
@@ -86,7 +87,7 @@ fn run() -> AppResult<()> {
         }
         return Ok(());
     }
-    state::initialize(&mut args)?;
+    state::initialize(state_options)?;
     if args.peek().is_some_and(|arg| arg == "--init-signing-key") {
         args.next();
         if args.next().is_some() {
